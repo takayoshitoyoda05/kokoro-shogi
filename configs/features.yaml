@@ -1,0 +1,10 @@
+# 機能フラグ: 各機能の実装が完了した週に true へ切り替える。
+# 全フラグ false でも forward が通ることを tests/test_features.py で保証する。
+# 切り替え時は担当Aがテスト通過を確認してからコミットすること。
+
+mood: false        # 感情GRUによる気分変化 (DESIGN.md §3(9)) — 週6に実装後trueへ
+relations: false   # 駒同士の関係性バイアス (attentionへの加算) — 週6-7に実装後trueへ
+council: false     # 会議調停ループ [D] 週6に実装後trueへ
+individual: false  # 個体差θ_ind (駒ごとの性格個体値・SQLite永続化) — 週7に実装後trueへ
+loyalty: false     # 忠誠 (取られ・寝返りへの感情反応) — 週7に実装後trueへ
+league: false      # 文化リーグPBT (集団ベース学習) — 週9に実装後trueへ

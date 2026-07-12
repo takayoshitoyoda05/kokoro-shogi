@@ -1,0 +1,17 @@
+[project]
+name = "kokoro-shogi"
+version = "0.0.0"
+description = "駒エージェント将棋AI: 各駒が性格・欲求・感情を持ち、会議調停で指し手を決める"
+requires-python = ">=3.12"
+# 依存は実装開始時に追加する (キックオフ時点では空)。予定リスト:
+#   torch        — モデル本体 (trunk / heads / 感情GRU)
+#   cshogi       — 盤面表現・合法手生成・CSA/SFENパース
+#   numpy        — 特徴量・ラベルの数値処理
+#   pydantic     — JSONL state_update スキーマ検証 (docs/INTERFACE.md, schema 1.0)
+#   websockets   — Unity向けWebSocketサーバ ws://localhost:8765 (週5)
+#   pyyaml       — configs/ の読み込み
+#   requests     — floodgate棋譜のダウンロード (週2)
+# 開発用 (dependency-groups で追加予定):
+#   pytest       — tests/ の実行
+#   ruff         — lint / format
+dependencies = []

@@ -1,0 +1,32 @@
+# ===== Python =====
+__pycache__/
+.venv/
+*.egg-info/
+.ruff_cache/
+
+# ===== データ系 (棋譜・学習成果物はコミットしない) =====
+# 先頭の / はリポジトリ直下の data/ のみを指す
+# (src/kokoro_shogi/data/ はソースパッケージなので除外しない)
+/data/
+checkpoints/
+runs/
+*.db
+*.pth
+*.pt
+.env
+
+# ===== Unity (unity/KokoroShogi/ 配下の生成物) =====
+unity/KokoroShogi/Library/
+unity/KokoroShogi/Temp/
+unity/KokoroShogi/Logs/
+unity/KokoroShogi/UserSettings/
+unity/KokoroShogi/obj/
+unity/KokoroShogi/Build/
+
+# ===== Blender (自動バックアップファイル) =====
+*.blend1
+*.blend2
+
+# ===== OS =====
+.DS_Store
+Thumbs.db

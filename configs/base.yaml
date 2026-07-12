@@ -1,0 +1,18 @@
+# モデル・損失のハイパーパラメータ (詳細は DESIGN.md §3)
+# 週次で値を調整する場合は docs/decisions/ にADRを残すこと。
+
+model:
+  d_model: 256   # 駒トークン埋め込みと共有Transformer trunkの隠れ次元
+  n_layers: 6    # trunkのTransformer層数
+  n_heads: 8     # attentionヘッド数 (利き/関係バイアスを各ヘッドに加算する)
+  d_theta: 16    # 性格ベクトルθの次元 (欲求6軸スコアとの内積で手スコアを構成)
+  d_mood: 32     # 感情GRUの隠れ状態次元 (features.yaml の mood が true のとき使用)
+
+loss:
+  lambda_g: 0.01 # 自由項gのL2正則化係数 (欲求で説明できない残差を小さく保つ)
+  tau: 1.0       # 全駒softmaxの温度 (小さいほど分布が先鋭化する)
+  c1: 1.0        # 方策損失 (蒸留時は教師手のクロスエントロピー) の重み
+  c2: 0.5        # critic (状態価値) 損失の重み — MAPPO中央critic用
+  c3: 0.01       # エントロピーボーナスの重み (探索の維持・週8のRLで使用)
+
+seed: 42         # 乱数シード (再現性のため全実験で固定)
