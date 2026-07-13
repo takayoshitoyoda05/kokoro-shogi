@@ -1,6 +1,6 @@
 # 個人計画書 B2: Blender担当② 盤・舞台・環境 (完全詳細版 / 10週)
 
-> 親文書: `TEAM_PLAN.md` / 三者契約: `naming.md` (B1/B2/U2)
+> 親文書: `TEAM_PLAN.md` / 三者契約: `naming.md` (B1/B2/U2, **週1に三者で作成** — それまでは本書§「naming.md 契約」の表が下書き)
 > この文書だけで作業を始められるよう、Blenderの操作手順・設定値・素材の
 > 入手先まで全て記載する。
 
@@ -27,7 +27,7 @@
 
 1. Blender 4.x インストール。未経験ならB1と同じくドーナツチュートリアル
    Part1-4 (2人で一緒にやると詰まりを共有できる)
-2. Git LFS セットアップ (U1の CONTRIBUTING.md)。
+2. Git LFS セットアップ (`docs/GIT_GUIDE.md` §1)。
    .blend原本は `blender/`、書き出しFBXは
    `unity/KokoroShogi/Assets/_Project/Models/Stage/`、テクスチャは
    `.../Textures/` へ

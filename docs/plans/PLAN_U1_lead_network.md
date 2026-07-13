@@ -74,7 +74,8 @@ Assets/_Project/
 ├── Prefabs/ Models/ Materials/ VFX/ UI/ Audio/ (U2/B1/B2)
 └── StreamingAssets/sample_data/  サンプルJSONL置き場
 ```
-最後に全員向け `docs/CONTRIBUTING.md` (環境構築手順・ブランチ手順) を書く。
+全員向けGit手順書は `docs/GIT_GUIDE.md` に作成済み。一読して不足
+(Unity特有の手順など) があれば追記し、週1MTGで全員が §1 を完了したか確認する。
 
 ---
 
@@ -241,7 +242,7 @@ public class WsClient : MonoBehaviour {
 
 | 週 | やること | 完了条件 |
 |---|---|---|
-| 1 | §1の環境構築すべて + CONTRIBUTING.md + 空シーン2つ | 全員がcloneして開ける |
+| 1 | §1の環境構築すべて + GIT_GUIDE.md確認 (全員の環境構築チェック) + 空シーン2つ | 全員がcloneして開ける |
 | 2 | Messages.cs / GameEvents.cs / SFENパーサ / ReplayPlayer v0 (Cube駒で再生) | サンプルJSONL 1局が最後まで流れる |
 | 3 | ReplayPlayer v1: 操作UI・シーク・速度 / B1の駒Prefab差し替え口 | 10局全てエラーなし・操作可能 |
 | 4 | ★統合点①主担当: 全員の成果を統合、Issue消化 | デモ可能なリプレイ |
@@ -259,7 +260,7 @@ public class WsClient : MonoBehaviour {
 - 統合週 (4/7/10) は自分の新規開発を止めて統合に専念する
 
 ## 6. つまずき対策 (先回り)
-- LFS未installでcloneした人が出る → CONTRIBUTING.md冒頭に太字、MTGで確認
+- LFS未installでcloneした人が出る → GIT_GUIDE.md §1.3 に太字で記載済み、週1MTGで全員完了を確認
 - `.meta` ファイル差分が荒れる → Force Text設定 + 「Unityを閉じてからpull」を周知
 - JSONのフィールド名ミスマッチ → C#クラスのフィールド名はJSONと**完全一致**
   (last_move のようにスネークケースのまま。リネームしない)

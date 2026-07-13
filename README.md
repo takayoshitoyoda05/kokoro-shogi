@@ -87,7 +87,8 @@ Blender素材 (blender/, B1/B2管理) が同居。
 | [`DESIGN.md`](./DESIGN.md) | AIアルゴリズム設計書 v2 (数式仕様・出典・学習フロー) | A |
 | [`TEAM_PLAN.md`](./TEAM_PLAN.md) | チーム全体計画 (v4: 役割・10週マイルストーン・運用ルール) | 全員 |
 | [`docs/INTERFACE.md`](./docs/INTERFACE.md) | データ契約の正本 (JSONスキーマ, バージョン管理) | 全員 |
-| [`docs/REPO_STRUCTURE.md`](./docs/REPO_STRUCTURE.md) | リポジトリ構成・Git運用ガイド | 全員 |
+| [`docs/REPO_STRUCTURE.md`](./docs/REPO_STRUCTURE.md) | リポジトリ構成 (フォルダの意味・置いてよいもの・担当区分) | 全員 |
+| [`docs/GIT_GUIDE.md`](./docs/GIT_GUIDE.md) | Gitの操作手順 (初学者向け: 環境構築・毎日の手順・トラブル対処) | 全員 |
 | [`docs/plans/PLAN_A_algorithm.md`](./docs/plans/PLAN_A_algorithm.md) | 個人計画書: AIアルゴリズム | Taka |
 | [`docs/plans/PLAN_U1_lead_network.md`](./docs/plans/PLAN_U1_lead_network.md) | 個人計画書: Unity-Python連携 (初学者向け) | U1 |
 | [`docs/plans/PLAN_U2_unity_main.md`](./docs/plans/PLAN_U2_unity_main.md) | 個人計画書: Unity本体 (初学者向け) | U2 |
@@ -131,6 +132,7 @@ git clone <this-repo>
 
 ### AI側 (担当: A)
 ```bash
+# uv未導入なら: https://docs.astral.sh/uv/ (Windows: winget install astral-sh.uv)
 cd kokoro-shogi
 uv sync                      # Python 3.12 + 依存一式
 uv run pytest                # ※初期リポジトリは全テストskipでグリーンになれば正常
