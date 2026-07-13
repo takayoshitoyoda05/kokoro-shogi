@@ -1,6 +1,6 @@
 # 個人計画書 B1: Blender担当① 駒モデリング (完全詳細版 / 10週)
 
-> 親文書: `TEAM_PLAN.md` / 三者契約: `naming.md` (B1/B2/U2)
+> 親文書: `TEAM_PLAN.md` / 三者契約: `naming.md` (B1/B2/U2, **週1に三者で作成** — それまでは本書§「naming.md 契約」の表が下書き)
 > この文書だけで作業を始められるよう、Blenderの操作手順・設定値まで全て記載する。
 
 ## 役割
@@ -27,7 +27,7 @@
 1. Blender 4.x を blender.org からインストール (無料)
 2. 未経験なら: Blender Guru「ドーナツチュートリアル」Part1-4 (基本操作・
    モデリング・マテリアルまで) をこの週にやる。Part5以降は不要
-3. Git LFS: U1の `docs/CONTRIBUTING.md` の手順で clone。
+3. Git LFS: `docs/GIT_GUIDE.md` §1 の手順で clone (LFSは**cloneより先に**)。
    自分の作業ファイルは `unity/KokoroShogi/Assets/_Project/Models/` (FBX) と
    リポジトリ直下 `blender/` (.blendの原本) に置く
 4. Preferences → Save & Load → Auto Save 有効化 (事故防止)

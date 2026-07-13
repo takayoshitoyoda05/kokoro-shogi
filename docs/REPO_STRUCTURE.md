@@ -2,6 +2,8 @@
 
 > 対象: チーム全員 (初学者含む)。リポジトリの構成・ブランチの使い方・
 > 置いてよいもの/いけないものを定義する。迷ったらこの文書に従う。
+> **Gitの具体的な操作手順 (コマンド・毎日の流れ・トラブル対処) は
+> [`docs/GIT_GUIDE.md`](./GIT_GUIDE.md) へ** — 本書は「ルール」、GIT_GUIDEは「手順」。
 
 ---
 
@@ -13,6 +15,7 @@ Unity側、Blender素材が同居する。世界をつなぐ契約書は2枚:
 - `docs/INTERFACE.md` — AI⇄Unityのデータ契約 (JSONスキーマ)。変更はA承認制
 - `unity/KokoroShogi/Assets/_Project/docs/naming.md` — Blender⇄Unityの
   アセット契約 (シェイプキー名・スケール・ピボット)。B1/B2/U2の三者管理
+  (**週1に作成**。それまでは各計画書の「naming.md 契約」表が下書き)
 
 モノレポの利点: 契約書のコピー同期が不要 / 全員が全体を1回のcloneで持てる。
 欠点 (Unityの大ファイルでcloneが重い) はGit LFSで抑える。
@@ -30,9 +33,10 @@ kokoro-shogi/
 │
 ├── docs/
 │   ├── INTERFACE.md         # ★データ契約の正本 (schema 1.0)
-│   ├── REPO_STRUCTURE.md    # この文書
+│   ├── REPO_STRUCTURE.md    # この文書 (ルール)
+│   ├── GIT_GUIDE.md         # Git操作手順 (初学者向け)
 │   ├── plans/               # 個人計画書5通 (PLAN_A, U1, U2, B1, B2)
-│   └── decisions/           # 設計判断の記録 (1判断1ファイル)
+│   └── decisions/           # 設計判断の記録 (1判断1ファイル。書式は decisions/README.md)
 │
 ├── src/kokoro_shogi/        # AI本体 (担当: A)
 │   ├── core/  model/  train/  data/
