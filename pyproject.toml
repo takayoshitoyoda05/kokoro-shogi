@@ -14,4 +14,6 @@ requires-python = ">=3.12"
 # 開発用 (dependency-groups で追加予定):
 #   pytest       — tests/ の実行
 #   ruff         — lint / format
-dependencies = []
+dependencies = [
+    "websockets>=13",
+]
