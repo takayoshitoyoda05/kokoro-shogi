@@ -23,7 +23,7 @@ import json
 import queue
 import threading
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -387,7 +387,7 @@ class WebSocketServerManager:
 
     @staticmethod
     def _now_iso() -> str:
-        return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        return datetime.now(UTC).astimezone().isoformat(timespec="seconds")
 
 
 _manager = WebSocketServerManager()

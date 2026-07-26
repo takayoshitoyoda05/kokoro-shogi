@@ -2,18 +2,43 @@
 name = "kokoro-shogi"
 version = "0.0.0"
 description = "駒エージェント将棋AI: 各駒が性格・欲求・感情を持ち、会議調停で指し手を決める"
-requires-python = ">=3.12"
-# 依存は実装開始時に追加する (キックオフ時点では空)。予定リスト:
-#   torch        — モデル本体 (trunk / heads / 感情GRU)
-#   cshogi       — 盤面表現・合法手生成・CSA/SFENパース
-#   numpy        — 特徴量・ラベルの数値処理
-#   pydantic     — JSONL state_update スキーマ検証 (docs/INTERFACE.md, schema 1.0)
-#   websockets   — Unity向けWebSocketサーバ ws://localhost:8765 (週5)
-#   pyyaml       — configs/ の読み込み
-#   requests     — floodgate棋譜のダウンロード (週2)
-# 開発用 (dependency-groups で追加予定):
-#   pytest       — tests/ の実行
-#   ruff         — lint / format
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "websockets>=13",
+    "cshogi>=0.7",      # 盤面表現・合法手生成・CSA/SFENパース
+    "numpy>=1.26",      # 特徴量・ラベルの数値処理
+    "pydantic>=2.7",    # JSONL state_update スキーマ検証 (docs/INTERFACE.md, schema 1.0)
+    "py7zr>=0.21",      # floodgate年次アーカイブ (wdoorYYYY.7z) の展開
+    "pyyaml>=6",        # configs/ の読み込み
+    "requests>=2.31",   # floodgate棋譜のダウンロード
+    "websockets>=13",   # Unity向けWebSocketサーバ ws://localhost:8765 (週5)
 ]
+
+# torch は 2GB 級のため既定の同期対象から外す。学習を回すマシン (gmk02) でのみ
+#   uv sync --group train
+# を実行する。サンプルJSONL納品 (週1) と Phase 0 の前処理は torch なしで完結する。
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+train = [
+    "torch>=2.3",
+    "tensorboard>=2.16",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kokoro_shogi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
