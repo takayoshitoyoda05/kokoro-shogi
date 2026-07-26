@@ -9,10 +9,13 @@ model:
   d_mood: 32     # 感情GRUの隠れ状態次元 (features.yaml の mood が true のとき使用)
 
 loss:
+  # 統一損失 (DESIGN.md §4):
+  #   L = L_policy + c1*L_value + c2*L_desire + lambda_g*L_g - c3*H(pi)
+  # L_policy には係数が付かない (蒸留では教師手のクロスエントロピー、RLではPPO損失)。
   lambda_g: 0.01 # 自由項gのL2正則化係数 (欲求で説明できない残差を小さく保つ)
   tau: 1.0       # 全駒softmaxの温度 (小さいほど分布が先鋭化する)
-  c1: 1.0        # 方策損失 (蒸留時は教師手のクロスエントロピー) の重み
-  c2: 0.5        # critic (状態価値) 損失の重み — MAPPO中央critic用
+  c1: 1.0        # 価値損失 (V - z)^2 の重み — Phase 1の蒸留から使う
+  c2: 0.5        # 欲求補助損失 L_desire (6軸BCE) の重み — Phase 2から使う
   c3: 0.01       # エントロピーボーナスの重み (探索の維持・週8のRLで使用)
 
 seed: 42         # 乱数シード (再現性のため全実験で固定)
