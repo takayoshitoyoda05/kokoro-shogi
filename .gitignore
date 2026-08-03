@@ -16,12 +16,45 @@ runs/
 .env
 
 # ===== Unity (unity/KokoroShogi/ 配下の生成物) =====
-unity/KokoroShogi/Library/
-unity/KokoroShogi/Temp/
-unity/KokoroShogi/Logs/
-unity/KokoroShogi/UserSettings/
-unity/KokoroShogi/obj/
-unity/KokoroShogi/Build/
+unity/KokoroShogi/.utmp/
+unity/KokoroShogi/[Ll]ibrary/
+unity/KokoroShogi/[Tt]emp/
+unity/KokoroShogi/[Oo]bj/
+unity/KokoroShogi/[Bb]uild/
+unity/KokoroShogi/[Bb]uilds/
+unity/KokoroShogi/[Ll]ogs/
+unity/KokoroShogi/[Uu]ser[Ss]ettings/
+unity/KokoroShogi/[Mm]emoryCaptures/
+unity/KokoroShogi/[Rr]ecordings/
+unity/KokoroShogi/.vs/
+
+# IDE・Unity自動生成
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.DotSettings.user
+
+# クラッシュ関連
+unity/KokoroShogi/sysinfo.txt
+mono_crash.*
+
+# 配布・ビルド成果物
+*.apk
+*.aab
+*.unitypackage
+*.unitypackage.meta
+*.app
 
 # ===== Blender (自動バックアップファイル) =====
 *.blend1
