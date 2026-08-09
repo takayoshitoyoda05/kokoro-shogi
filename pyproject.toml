@@ -26,6 +26,17 @@ train = [
     "tensorboard>=2.16",
 ]
 
+# torch は CUDA 12.8 ビルド (cu128) を明示する。PyPI 既定の cu130 ビルドは
+# WSL側のドライバ (CUDA 12.8) より新しく、GPUが認識されない。
+# cu128 はドライバが新しいマシン (gmk02) でも後方互換で動く。
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
