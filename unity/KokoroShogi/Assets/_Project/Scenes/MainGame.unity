@@ -201,7 +201,19 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 53111754}
   m_OnClick:
     m_PersistentCalls:
-      m_Calls: []
+      m_Calls:
+      - m_Target: {fileID: 1695837887}
+        m_TargetAssemblyTypeName: GameSceneDirector, Assembly-CSharp
+        m_MethodName: OnClickEvolutionApply
+        m_Mode: 1
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument: 
+          m_BoolArgument: 0
+        m_CallState: 2
 --- !u!114 &53111754
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -449,7 +461,19 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 294809549}
   m_OnClick:
     m_PersistentCalls:
-      m_Calls: []
+      m_Calls:
+      - m_Target: {fileID: 1695837887}
+        m_TargetAssemblyTypeName: GameSceneDirector, Assembly-CSharp
+        m_MethodName: OnClickRematch
+        m_Mode: 1
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument: 
+          m_BoolArgument: 0
+        m_CallState: 2
 --- !u!114 &294809549
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -556,7 +580,7 @@ Canvas:
   m_GameObject: {fileID: 341963523}
   m_Enabled: 1
   serializedVersion: 3
-  m_RenderMode: 1
+  m_RenderMode: 0
   m_Camera: {fileID: 506495394}
   m_PlaneDistance: 100
   m_PixelPerfect: 0
@@ -819,7 +843,7 @@ Transform:
   m_GameObject: {fileID: 506495392}
   serializedVersion: 2
   m_LocalRotation: {x: 0.5735764, y: -0, z: -0, w: 0.8191521}
-  m_LocalPosition: {x: 2.87238, y: 10, z: -50.97641}
+  m_LocalPosition: {x: 2.87238, y: 8.18, z: -50.32}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -951,7 +975,19 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 580528250}
   m_OnClick:
     m_PersistentCalls:
-      m_Calls: []
+      m_Calls:
+      - m_Target: {fileID: 1695837887}
+        m_TargetAssemblyTypeName: GameSceneDirector, Assembly-CSharp
+        m_MethodName: OnClickTitle
+        m_Mode: 1
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument: 
+          m_BoolArgument: 0
+        m_CallState: 2
 --- !u!114 &580528250
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1540,7 +1576,7 @@ MonoBehaviour:
   - {fileID: 666933454626375695, guid: 8ba66c9ab31e64a05a2e21ab8146320b, type: 3}
   - {fileID: 4803137593304980999, guid: 63fa7bbd37b954eb5ba1eb8de8775a76, type: 3}
   - {fileID: 7192563923468346473, guid: 1aa7de467965d401db003be33f83cda5, type: 3}
-  prefabCurSor: {fileID: 3394109681229454874, guid: c26d3cca767285447afd965bb0c57ac5, type: 3}
+  prefabCursor: {fileID: 3394109681229454874, guid: c26d3cca767285447afd965bb0c57ac5, type: 3}
   prefabUnitTile: {fileID: 1361154618405264304, guid: 5f1018e400e5c2e498fe6d80f782283e, type: 3}
 --- !u!1 &1788833232
 GameObject:
@@ -1761,7 +1797,19 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 1804375907}
   m_OnClick:
     m_PersistentCalls:
-      m_Calls: []
+      m_Calls:
+      - m_Target: {fileID: 1695837887}
+        m_TargetAssemblyTypeName: GameSceneDirector, Assembly-CSharp
+        m_MethodName: OnClickEvolutionCancel
+        m_Mode: 1
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument: 
+          m_BoolArgument: 0
+        m_CallState: 2
 --- !u!114 &1804375907
 MonoBehaviour:
   m_ObjectHideFlags: 0
