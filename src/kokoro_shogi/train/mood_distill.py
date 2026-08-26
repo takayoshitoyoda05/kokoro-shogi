@@ -216,12 +216,15 @@ def main() -> None:
     gru = MoodGRU(config.model).to(device)
     projection = MoodProjection(config.model).to(device)  # 未学習のまま同梱 (後で回帰)
     # ウォームスタート元に学習済みGRU/射影があれば引き継ぐ
+    # (イベント特徴の次元が変わった場合は形が合わないので新規初期化)
     if args.warm_start is not None and args.warm_start.exists():
         warm = torch.load(args.warm_start, map_location=device, weights_only=True)
-        if "mood_gru" in warm:
-            gru.load_state_dict(warm["mood_gru"])
-        if "mood_projection" in warm:
-            projection.load_state_dict(warm["mood_projection"])
+        for module, key in ((gru, "mood_gru"), (projection, "mood_projection")):
+            if key in warm:
+                try:
+                    module.load_state_dict(warm[key])
+                except RuntimeError:
+                    print(f"{key}: 形が合わないため新規初期化 (イベント特徴の変更)")
     optimizer = torch.optim.AdamW(
         [*policy.parameters(), *gru.parameters()], lr=args.lr, weight_decay=args.weight_decay
     )

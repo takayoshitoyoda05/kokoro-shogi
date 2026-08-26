@@ -51,12 +51,26 @@ EVENT_FEATURES = (
     "enemy_lost",      # 敵駒が取られた = 味方の戦果 (距離減衰)
     "threatened",      # 自分のマスへの敵の利き数 (0-3を正規化)
     "king_in_check",   # 自玉が王手をかけられている
+    "material_swing",  # 駒得の増減 (自軍が得なら+、損なら−)。valence の形勢信号
 )
 NUM_EVENT_FEATURES = len(EVENT_FEATURES)
 
-MOVED, CAPTURED, WAS_CAPTURED, PROMOTED, ALLY_LOST, ENEMY_LOST, THREATENED, KING_IN_CHECK = range(
-    NUM_EVENT_FEATURES
-)
+(
+    MOVED,
+    CAPTURED,
+    WAS_CAPTURED,
+    PROMOTED,
+    ALLY_LOST,
+    ENEMY_LOST,
+    THREATENED,
+    KING_IN_CHECK,
+    MATERIAL_SWING,
+) = range(NUM_EVENT_FEATURES)
+
+#: 駒得スイングの重み付けに使う駒の価値 (取られた時点では生駒に戻っている)
+_PIECE_VALUE = {"FU": 1, "KY": 3, "KE": 3, "GI": 5, "KI": 6, "KA": 8, "HI": 10, "OU": 0}
+#: tanh(価値/8): 歩0.12 〜 飛0.85 におさめるスケール
+_SWING_SCALE = 8.0
 
 
 def _l1_distance(a: int, b: int) -> int:
@@ -86,11 +100,14 @@ def build_event_features(
 
     capture_square: int | None = None
     losing_owner: int | None = None
+    swing = 0.0
     if record is not None and record.capture and record.captured_piece_id is not None:
         capture_square = str_to_sq(record.to_square)
+        captured = tracker.get(record.captured_piece_id)
         # tracker は指した後の状態なので、取られた駒の owner は既に捕獲側。
         # 駒を失った側はその反対
-        losing_owner = 1 - tracker.get(record.captured_piece_id).owner
+        losing_owner = 1 - captured.owner
+        swing = math.tanh(_PIECE_VALUE.get(captured.species, 5) / _SWING_SCALE)
 
     for index, state in enumerate(states):
         if index >= max_pieces:
@@ -117,6 +134,8 @@ def build_event_features(
             decay = math.exp(-_l1_distance(square, capture_square) / BETA)
             axis = ALLY_LOST if state.owner == losing_owner else ENEMY_LOST
             features[index, axis] = decay
+            # 形勢信号は距離に依らず陣営全体へ (valence の教師なし素材)
+            features[index, MATERIAL_SWING] = -swing if state.owner == losing_owner else swing
 
     return features
 

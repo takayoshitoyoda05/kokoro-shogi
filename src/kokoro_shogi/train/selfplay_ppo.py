@@ -217,23 +217,57 @@ def collect_games(
     tau: float,
     max_plies: int,
     generator: torch.Generator,
+    opponents: list[KokoroPolicy] | None = None,
+    opponent_prob: float = 0.5,
 ) -> tuple[list[dict], dict]:
-    """並列自己対戦で軌跡を収集し、(全ステップ, 統計) を返す。"""
+    """並列自己対戦で軌跡を収集し、(学習側のステップ, 統計) を返す。
+
+    `opponents` (過去スナップショットのプール) を渡すと、確率 `opponent_prob` で
+    片側を過去の自分が受け持つ (自己対戦相手への過適合対策、AlphaStarリーグの
+    最小版)。相手側の手は方策が違うため**学習データには含めない** (on-policy)。
+    GAEは局全体で計算する (相手手番の価値は凍結された旧valueヘッドの近似)。
+    """
     model.eval()
     envs = [SelfPlayEnv(model, gru, device) for _ in range(games)]
+    matchup: list[tuple[KokoroPolicy | None, int]] = []  # (相手モデル, 学習側の手番)
+    for _ in envs:
+        use_opponent = (
+            opponents
+            and float(torch.rand((), generator=generator)) < opponent_prob
+        )
+        if use_opponent:
+            pick = int(torch.randint(len(opponents), (1,), generator=generator))
+            matchup.append((opponents[pick], int(torch.randint(2, (1,), generator=generator))))
+        else:
+            matchup.append((None, -1))
 
     for _ply in range(max_plies):
-        pairs = [(env, env.observe(gru)) for env in envs if not env.done]
-        pairs = [(env, obs) for env, obs in pairs if obs is not None]
+        pairs = [
+            (index, env, env.observe(gru)) for index, env in enumerate(envs) if not env.done
+        ]
+        pairs = [(index, env, obs) for index, env, obs in pairs if obs is not None]
         if not pairs:
             break
-        output = batch_forward(model, [obs for _, obs in pairs], device)
-        log_probs = output.log_probs(tau=1.0)
-        probs = torch.softmax(output.logits / tau, dim=-1)
-        actions = torch.multinomial(probs.cpu(), 1, generator=generator).squeeze(-1)
-        for row, (env, obs) in enumerate(pairs):
-            action = int(actions[row])
-            env.step(action, float(log_probs[row, action]), float(output.value[row]), obs)
+        # どのモデルが指す番かでグループ化してまとめて forward
+        groups: dict[int, tuple[KokoroPolicy, list[tuple[int, SelfPlayEnv, dict]]]] = {}
+        for index, env, obs in pairs:
+            opponent, learner_side = matchup[index]
+            if opponent is not None and obs["turn"] != learner_side:
+                acting = opponent
+            else:
+                acting = model
+            groups.setdefault(id(acting), (acting, []))[1].append((index, env, obs))
+
+        for acting, members in groups.values():
+            output = batch_forward(acting, [obs for _, _, obs in members], device)
+            log_probs = output.log_probs(tau=1.0)
+            probs = torch.softmax(output.logits / tau, dim=-1)
+            actions = torch.multinomial(probs.cpu(), 1, generator=generator).squeeze(-1)
+            for row, (index, env, obs) in enumerate(members):
+                opponent, learner_side = matchup[index]
+                obs["learner"] = opponent is None or obs["turn"] == learner_side
+                action = int(actions[row])
+                env.step(action, float(log_probs[row, action]), float(output.value[row]), obs)
 
     steps: list[dict] = []
     decided = 0
@@ -253,6 +287,8 @@ def collect_games(
 
         labels = compute_desire_labels(env.moves).labels  # (T, 40, 6)
         for t, step in enumerate(env.steps):
+            if not step.get("learner", True):
+                continue  # 相手側 (過去スナップショット) の手はoff-policyなので捨てる
             step["advantage"] = float(advantages[t])
             step["return"] = float(advantages[t] + values[t])
             step["labels"] = labels[t]
@@ -400,6 +436,14 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--eval-every", type=int, default=5)
     parser.add_argument("--eval-games", type=int, default=20)
+    parser.add_argument(
+        "--snapshot-every", type=int, default=50,
+        help="この間隔で凍結スナップショットを相手プールへ追加 (0で無効)",
+    )
+    parser.add_argument("--pool-size", type=int, default=5, help="相手プールの最大数")
+    parser.add_argument(
+        "--opponent-prob", type=float, default=0.5, help="片側を過去の自分が受け持つ確率"
+    )
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -425,6 +469,8 @@ def main() -> None:
     snapshot = copy.deepcopy(model)  # Gate: 開始時スナップショットとの対戦勝率
     for parameter in snapshot.parameters():
         parameter.requires_grad_(False)
+    snapshot.eval()
+    pool: list[KokoroPolicy] = [snapshot]  # 相手プール (先頭は常に開始時)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
     print(f"warm start: {args.checkpoint.name} / device: {device} / features: {flags}")
@@ -435,6 +481,8 @@ def main() -> None:
         steps, collect_stats = collect_games(
             model, gru, args.games_per_iter, device,
             tau=args.tau, max_plies=args.max_plies, generator=generator,
+            opponents=pool if args.snapshot_every else None,
+            opponent_prob=args.opponent_prob,
         )
         if not steps:
             print(f"iter {iteration}: 軌跡が空 (全局即終了?)")
@@ -450,6 +498,15 @@ def main() -> None:
             entry["win_rate_vs_start"] = play_match(
                 model, snapshot, gru, args.eval_games, device, seed=config.seed + iteration
             )
+        if args.snapshot_every and iteration % args.snapshot_every == 0:
+            frozen = copy.deepcopy(model)
+            for parameter in frozen.parameters():
+                parameter.requires_grad_(False)
+            frozen.eval()
+            pool.append(frozen)
+            if len(pool) > args.pool_size:
+                pool.pop(1)  # 開始時 (pool[0]) は残し、次に古いものを落とす
+
         history.append(entry)
         win = entry.get("win_rate_vs_start")
         print(
