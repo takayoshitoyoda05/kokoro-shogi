@@ -5,8 +5,10 @@
 - **本物 (モデル出力)**: 指し手 (方策からのサンプリング)、`eval` (valueヘッド)、
   `pieces[].desire` (欲求ヘッドを、その駒の合法手について方策確率で重み付け平均)、
   `pieces[].alpha` (単調mixingの発言力)
-- **ダミー継続**: `mood` / `relations` は gen_sample_jsonl のヒューリスティックのまま
-  (感情GRU [A] と関係性 [C] は Phase 3)。`council` / `narration` は機能OFFのため空。
+- **ダミー継続**: `relations` は gen_sample_jsonl のヒューリスティックのまま
+  (関係性 [C] は未実装)。`council` / `narration` は機能OFFのため空。
+  `mood` は既定ではヒューリスティックだが、`--mood-checkpoint` に
+  train/mood_distill.py の出力を渡すと感情GRU + 射影の本物になる。
 
 欲求ヘッド $d_i(a)$ は手ごとの値なので、駒ごとの `desire` へは
 $d_i = \\sum_{a \\in \\mathcal{A}_i} \\pi(a) d_i(a) / \\sum_{a \\in \\mathcal{A}_i} \\pi(a)$
@@ -31,6 +33,7 @@ import torch
 
 from gen_sample_jsonl import MoodHeuristics, build_career, round3
 from kokoro_shogi.config import REPO_ROOT, load_config
+from kokoro_shogi.model.mood import MoodGRU, MoodProjection, build_event_features
 from kokoro_shogi.core.effects import piece_effect_matrix
 from kokoro_shogi.core.piece_state import MoveRecord, PieceIdTracker, PieceState
 from kokoro_shogi.core.pieces import BLACK, base_species, SPECIES_ORDER, HAND_INDEX_TO_SPECIES
@@ -42,6 +45,7 @@ from kokoro_shogi.logging.jsonl import (
     Desire,
     JsonlWriter,
     LastMove,
+    Mood,
     PieceInfo,
     StateUpdate,
     to_json_line,
@@ -95,19 +99,47 @@ def build_action_map(
 
 
 class ModelRunner:
-    """1局面ぶんのモデル出力 (desire / alpha / eval / 方策) を取り出す。"""
+    """1局面ぶんのモデル出力 (desire / alpha / eval / 方策 / mood) を取り出す。
 
-    def __init__(self, checkpoint: Path, device: torch.device) -> None:
+    `mood_checkpoint` (train/mood_distill.py の出力) を渡すと features.mood=True の
+    方策 + 感情GRU + 3軸射影を使い、JSONL の `mood` も本物になる。
+    渡さなければ Phase 2 の方策で、mood はヒューリスティックのまま。
+    """
+
+    def __init__(
+        self, checkpoint: Path, device: torch.device, *, mood_checkpoint: Path | None = None
+    ) -> None:
+        from dataclasses import replace
+
         config = load_config()
-        self.model = KokoroPolicy.from_config(config, head="desire").to(device)
-        state = torch.load(checkpoint, map_location=device, weights_only=True)
-        self.model.load_state_dict(state["model"])
-        self.model.eval()
         self.device = device
         self.tokenizer = PieceTokenizer()
+        self.gru: MoodGRU | None = None
+        self.projection: MoodProjection | None = None
+
+        if mood_checkpoint is not None:
+            state = torch.load(mood_checkpoint, map_location=device, weights_only=True)
+            flags = replace(config.features, mood=True)
+            self.model = KokoroPolicy(
+                config.model, flags, tau=config.loss.tau, head="desire"
+            ).to(device)
+            self.model.load_state_dict(state["model"])
+            self.gru = MoodGRU(config.model).to(device)
+            self.gru.load_state_dict(state["mood_gru"])
+            self.gru.eval()
+            self.projection = MoodProjection(config.model).to(device)
+            self.projection.load_state_dict(state["mood_projection"])
+            self.projection.eval()
+        else:
+            state = torch.load(checkpoint, map_location=device, weights_only=True)
+            self.model = KokoroPolicy.from_config(config, head="desire").to(device)
+            self.model.load_state_dict(state["model"])
+        self.model.eval()
 
     @torch.no_grad()
-    def forward(self, board: cshogi.Board, tokens: TokenizedPosition):
+    def forward(
+        self, board: cshogi.Board, tokens: TokenizedPosition, mood: torch.Tensor | None = None
+    ):
         """モデルを1回走らせて (PolicyOutput, 合法手マスク) を返す。"""
         legal = legal_move_mask(
             board, tokens.position, tokens.owner, tokens.species, tokens.mask
@@ -124,6 +156,7 @@ class ModelRunner:
             turn=torch.tensor([tokens.turn], dtype=torch.long, device=self.device),
             effect=torch.from_numpy(effect)[None].to(self.device),
             legal=torch.from_numpy(legal)[None].to(self.device),
+            mood=mood,
         )
         return output, legal
 
@@ -149,7 +182,12 @@ class ModelRunner:
 
 
 def desires_for_all_pieces(
-    runner: ModelRunner, board: cshogi.Board, tokens: TokenizedPosition, output, legal: np.ndarray
+    runner: ModelRunner,
+    board: cshogi.Board,
+    tokens: TokenizedPosition,
+    output,
+    legal: np.ndarray,
+    mood: torch.Tensor | None = None,
 ) -> list[Desire]:
     """全40駒の desire。手番でない側は手番を反転した盤面でもう1回 forward する。"""
     by_token = runner.piece_desires(output, legal)
@@ -166,7 +204,7 @@ def desires_for_all_pieces(
     )
     try:
         flipped_board = cshogi.Board(to_sfen(flipped))
-        flipped_output, flipped_legal = runner.forward(flipped_board, flipped)
+        flipped_output, flipped_legal = runner.forward(flipped_board, flipped, mood)
         for index, value in runner.piece_desires(flipped_output, flipped_legal).items():
             by_token.setdefault(index, value)
     except Exception:
@@ -191,6 +229,7 @@ def build_state_update(
     output,
     legal: np.ndarray,
     tokens: TokenizedPosition,
+    mood_state: torch.Tensor | None = None,
 ) -> StateUpdate:
     """`board` は指した後の局面。desire/alpha/eval がモデル出力になる。"""
     # value は手番側視点 (make_labels の z と同じ) なので先手視点へ直す
@@ -198,13 +237,26 @@ def build_state_update(
     evaluation = round3(value if tokens.turn == BLACK else -value)
 
     heuristics = MoodHeuristics(board, tracker, evaluation)
-    desires = desires_for_all_pieces(runner, board, tokens, output, legal)
+    desires = desires_for_all_pieces(runner, board, tokens, output, legal, mood_state)
     alpha = output.alpha[0].cpu().numpy()
+
+    projected = None
+    if mood_state is not None and runner.projection is not None:
+        with torch.no_grad():
+            projected = runner.projection(mood_state)[0].cpu().numpy()  # (40, 3)
 
     pieces: list[PieceInfo] = []
     states = sorted(tracker.states.values(), key=lambda item: item.piece_id)
     for index, state in enumerate(states):  # トークンも piece_id 順なので index が一致
-        mood = heuristics.mood(state)
+        if projected is not None:
+            fear, aggression, valence = projected[index]
+            mood = Mood(
+                fear=round3(float(fear)),
+                aggression=round3(float(aggression)),
+                valence=round3(float(valence)),
+            )
+        else:
+            mood = heuristics.mood(state)
         pieces.append(
             PieceInfo(
                 piece_id=state.piece_id,
@@ -266,12 +318,24 @@ def generate_game(
 
     ply = 0
     record: MoveRecord | None = None
+    mood_state: torch.Tensor | None = None
     with JsonlWriter(path) as writer:
         while True:
+            if runner.gru is not None:
+                # m^(t) = GRU(u_ev(t), m^(t-1))。イベントは直前の手のもの (train/mood_distill と同じ時刻合わせ)
+                if mood_state is None:
+                    mood_state = runner.gru.initial_state(1, MAX_PIECES, device=runner.device)
+                events = build_event_features(board, tracker, record)
+                with torch.no_grad():
+                    mood_state = runner.gru(
+                        torch.from_numpy(events)[None].to(runner.device), mood_state
+                    )
             tokens = runner.tokenizer.tokenize(board, tracker)
-            output, legal = runner.forward(board, tokens)
+            output, legal = runner.forward(board, tokens, mood_state)
             writer.write(
-                build_state_update(runner, board, tracker, ply, record, output, legal, tokens)
+                build_state_update(
+                    runner, board, tracker, ply, record, output, legal, tokens, mood_state
+                )
             )
             if ply >= max_plies or board.is_game_over() or not legal.any():
                 break
@@ -288,6 +352,12 @@ def main() -> None:
     parser.add_argument("--games", type=int, default=DEFAULT_GAMES)
     parser.add_argument("--max-plies", type=int, default=DEFAULT_MAX_PLIES)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument(
+        "--mood-checkpoint",
+        type=Path,
+        default=None,
+        help="train/mood_distill.py の出力。指定すると mood も本物 (感情GRU+射影) になる",
+    )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--tau", type=float, default=DEFAULT_TAU, help="自己対戦の温度 (0でargmax)")
     parser.add_argument("--seed", type=int, default=None)
@@ -300,8 +370,10 @@ def main() -> None:
     seed = args.seed if args.seed is not None else load_config().seed
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    runner = ModelRunner(args.checkpoint, device)
-    print(f"checkpoint: {args.checkpoint.name} / device: {device}")
+    runner = ModelRunner(args.checkpoint, device, mood_checkpoint=args.mood_checkpoint)
+    source = args.mood_checkpoint.name if args.mood_checkpoint else args.checkpoint.name
+    print(f"checkpoint: {source} / device: {device} / mood: "
+          + ("感情GRU" if runner.gru is not None else "ヒューリスティック"))
 
     results: list[dict[str, PieceState]] = []
     promotions: dict[str, int] = {}
