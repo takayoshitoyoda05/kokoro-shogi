@@ -32,7 +32,20 @@ from kokoro_shogi.data.dataset import (
     legal_move_mask,
 )
 from kokoro_shogi.data.labels import NUM_AXES
+from kokoro_shogi.core.tokenizer import PieceTokenizer
 from kokoro_shogi.model.mood import NUM_EVENT_FEATURES, build_event_features
+
+
+def _initial_row() -> dict[str, np.ndarray]:
+    """平手初期局面のトークン行 (make_labels と同じ tracker 経由のトークン化)。"""
+    board = cshogi.Board()
+    tokens = PieceTokenizer().tokenize(board, PieceIdTracker(board))
+    return {
+        "species": tokens.species,
+        "position": tokens.position,
+        "owner": tokens.owner,
+        "promoted": tokens.promoted,
+    }
 
 
 @dataclass(frozen=True)
@@ -73,15 +86,34 @@ class SequenceDataset:
         columns: dict[str, list[np.ndarray]] = {name: [] for name in SHARD_COLUMNS}
         boundaries: list[tuple[int, int]] = []
         offset = 0
+        initial = _initial_row()
+        #: 初期局面から始まらず捨てた断片の数 (0でなければデータ側の要調査サイン)
+        self.dropped = 0
 
         for path in paths:
             with np.load(path) as shard:
                 index = shard["game_index"]
-                # 連続する同一 game_index を1局とみなす (シャード間で番号が
-                # 重複しても、局がシャードを跨がないので誤結合しない)
-                starts = np.flatnonzero(np.diff(index, prepend=index[0] - 1))
+                # 局の始まり = game_index の変化点 ∪ 初期局面の行。
+                # game_index は棋譜**ファイル内**の連番なので、1局だけのファイルが
+                # 連続すると隣接する別の局が同じ番号になり、変化点だけでは融合する
+                # (実データで確認済み)。全ての局は初期局面から始まる
+                # (make_labels.encode_game) ので、初期局面の行を境界に加えると
+                # この取りこぼしがなくなる
+                changed = np.diff(index, prepend=index[0] - 1) != 0
+                at_initial = np.logical_and.reduce(
+                    [
+                        (shard[name].reshape(len(index), -1) == initial[name].ravel()).all(axis=1)
+                        for name in ("species", "position", "owner", "promoted")
+                    ]
+                ) & (shard["turn"] == 0)
+                starts = np.flatnonzero(changed | at_initial)
                 ends = np.append(starts[1:], len(index))
                 for start, end in zip(starts, ends, strict=True):
+                    # 初期局面から始まらない断片 (古いシャードの局跨ぎflush等) は
+                    # 再生できないので捨てる
+                    if not at_initial[start]:
+                        self.dropped += 1
+                        continue
                     boundaries.append((offset + int(start), offset + int(end)))
                 for name in SHARD_COLUMNS:
                     columns[name].append(shard[name])
@@ -123,12 +155,18 @@ class SequenceDataset:
                 int(square) if flag and square < NUM_SQUARES else -1
                 for square, flag in zip(position[t], mask[t], strict=True)
             ]
-            effect[t] = piece_effect_matrix(board, squares).astype(np.int64)
-            legal[t] = legal_move_mask(board, position[t], owner[t], species[t], mask[t])
-
-            move = int(moves[t])
-            record = tracker.apply_move(board, move)
-            board.push(move)
+            try:
+                effect[t] = piece_effect_matrix(board, squares).astype(np.int64)
+                legal[t] = legal_move_mask(board, position[t], owner[t], species[t], mask[t])
+                move = int(moves[t])
+                record = tracker.apply_move(board, move)
+                board.push(move)
+            except (ValueError, KeyError) as error:
+                # 再生盤面が行データとズレた = 局の境界検出の取りこぼし。
+                # どの局か分かるように包み直す
+                raise ValueError(
+                    f"game {game} (行 {start + t}) で再生が行データと不整合: {error}"
+                ) from error
 
         action = np.array(
             [

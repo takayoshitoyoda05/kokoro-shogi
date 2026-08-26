@@ -97,6 +97,28 @@ def test_games_are_split_at_boundaries(shard: Path) -> None:
         assert total == len(data["move_to"])
 
 
+def test_adjacent_games_with_same_index_are_still_split(
+    shard: Path, tmp_path: Path
+) -> None:
+    """game_index は棋譜ファイル内の連番なので、隣接する別の局が同じ番号を持ち得る。
+
+    その場合でも「初期局面の行」を境界として2局に割れること (実データで
+    学習をクラッシュさせた融合バグの回帰テスト)。
+    """
+    with np.load(shard) as data:
+        columns = {name: data[name] for name in data.files}
+    columns["game_index"] = np.zeros_like(columns["game_index"])  # 全局を同じ番号に
+
+    merged = tmp_path / "shard_merged.npz"
+    np.savez(merged, **columns)
+
+    dataset = SequenceDataset([merged])
+    assert len(dataset) == 2
+    for game in range(2):
+        sequence = dataset[game]  # 再生が通る = 境界が正しい
+        assert sequence.length > 0
+
+
 def test_replay_matches_stored_tokens(shard: Path) -> None:
     """局の再生 (合法手・イベント計算の土台) が行のトークンとずれない。"""
     dataset = SequenceDataset([shard])
