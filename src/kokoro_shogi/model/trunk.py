@@ -157,6 +157,11 @@ class KokoroTrunk(nn.Module):
 
             self.relation_bias = RelationAttentionBias(self.config.n_heads)
 
+        # 個体性格 θ_ind [B] の合流点 W_ind (DESIGN.md §3(1))。零初期化
+        if self.features.individual:
+            self.individual_proj = nn.Linear(self.config.d_theta, d_model, bias=False)
+            nn.init.zeros_(self.individual_proj.weight)
+
         self.layers = nn.ModuleList(
             KokoroEncoderLayer(d_model, self.config.n_heads, d_model * 4)
             for _ in range(self.config.n_layers)
@@ -174,11 +179,14 @@ class KokoroTrunk(nn.Module):
         effect: Tensor | None = None,
         mood: Tensor | None = None,
         relation: Tensor | None = None,
+        individual: Tensor | None = None,
     ) -> Tensor:
         batch, tokens = species.shape
         hidden = self.embedding(species, position, owner, promoted, turn)
         if mood is not None and self.features.mood:
             hidden = hidden + self.mood_proj(mood)
+        if individual is not None and self.features.individual:
+            hidden = hidden + self.individual_proj(individual)
 
         bias = self._attention_bias(effect, mask, batch, tokens, hidden.dtype, relation)
         flat_bias = bias.reshape(batch * self.config.n_heads, tokens, tokens)

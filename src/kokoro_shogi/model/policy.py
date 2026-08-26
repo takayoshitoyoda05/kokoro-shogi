@@ -39,6 +39,9 @@ from kokoro_shogi.model.trunk import NUM_SPECIES, KokoroTrunk
 #: 非合法手に入れる値 (DESIGN.md §3(7))
 ILLEGAL_LOGIT = -1e9
 
+#: 忠誠ハンデ [E] の強さ κ_E (DESIGN.md §3(9))。バリアント限定・棋力評価には使わない
+KAPPA_LOYALTY = 0.5
+
 #: 手スコアの作り方。plain = 素のsrc-dst (Phase 1) / desire = 欲求分解 (Phase 2)
 HEAD_KINDS = ("plain", "desire")
 
@@ -132,6 +135,8 @@ class KokoroPolicy(nn.Module):
                 num_species=NUM_SPECIES,
                 # 感情 [A] は性格重みにも合流する ($w_i$ が対局中に動く仕組み)
                 d_mood=self.model_config.d_mood if self.features.mood else 0,
+                # 個体性格 [B] も同様 (DESIGN.md §3(4))
+                d_individual=self.model_config.d_theta if self.features.individual else 0,
             )
             self.mixing = MonotonicValueMixing(self.model_config, max_pieces=max_pieces)
 
@@ -154,9 +159,11 @@ class KokoroPolicy(nn.Module):
         mood: Tensor | None = None,
         relation: Tensor | None = None,
         rounds: int | None = None,
+        individual: Tensor | None = None,
+        loyalty: Tensor | None = None,
     ) -> PolicyOutput:
         hidden = self.trunk(
-            species, position, owner, promoted, mask, turn, effect, mood, relation
+            species, position, owner, promoted, mask, turn, effect, mood, relation, individual
         )
 
         council = None
@@ -165,11 +172,13 @@ class KokoroPolicy(nn.Module):
             extra: dict[str, Tensor] = {}
             value = self.value_head(hidden, mask)
         else:
-            scores, extra, value = self._desire_scores(hidden, species, mask, mood)
+            scores, extra, value = self._desire_scores(
+                hidden, species, mask, mood, individual, loyalty
+            )
             if self.features.council:
                 hidden, scores, extra, value, council = self._council(
                     hidden, scores, extra, value, species, mask, legal,
-                    effect, mood, relation, rounds,
+                    effect, mood, relation, rounds, individual, loyalty,
                 )
 
         scores = self._mask_scores(scores, mask, legal)
@@ -201,6 +210,8 @@ class KokoroPolicy(nn.Module):
         mood: Tensor | None,
         relation: Tensor | None,
         rounds: int | None,
+        individual: Tensor | None = None,
+        loyalty: Tensor | None = None,
     ):
         """会議調停 [D] (DESIGN.md §3(6))。
 
@@ -220,19 +231,35 @@ class KokoroPolicy(nn.Module):
             hidden = self.trunk.reapply_last_layers(
                 hidden, proposals, mask, effect, relation
             )
-            scores, extra, value = self._desire_scores(hidden, species, mask, mood)
+            scores, extra, value = self._desire_scores(
+                hidden, species, mask, mood, individual, loyalty
+            )
             logs.append(CouncilRoundLog(token=token, move_kind=move_kind, bid=bid))
 
         return hidden, scores, extra, value, tuple(logs)
 
     def _desire_scores(
-        self, hidden: Tensor, species: Tensor, mask: Tensor, mood: Tensor | None = None
+        self,
+        hidden: Tensor,
+        species: Tensor,
+        mask: Tensor,
+        mood: Tensor | None = None,
+        individual: Tensor | None = None,
+        loyalty: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor], Tensor]:
-        """$s_{i,a} = \\langle w_i, d_i(a)\\rangle + g_i(a)$ (DESIGN.md §3(6) 初期スコア)。"""
+        """$s_{i,a} = \\langle w_i, d_i(a)\\rangle + g_i(a)$ (DESIGN.md §3(6) 初期スコア)。
+
+        忠誠 [E, バリアント]: `loyalty` `(B, N)` (寝返っていない駒は0を渡す) が
+        来たら $d_i(a) \\leftarrow d_i(a)(1 - \\kappa_E\\,\\mathrm{loyalty}_i)$。
+        """
         desire = self.desire_head(hidden)  # (B, N, 162, 6)
+        if loyalty is not None and self.features.loyalty:
+            desire = desire * (1.0 - KAPPA_LOYALTY * loyalty).clamp(min=0.0)[:, :, None, None]
         free_term = self.free_term_head(hidden)  # (B, N, 162)
         weights = self.personality(
-            species, mood=mood if self.features.mood else None
+            species,
+            mood=mood if self.features.mood else None,
+            individual=individual if self.features.individual else None,
         )  # (B, N, 6)
 
         explained = (desire * weights.unsqueeze(2)).sum(dim=-1)  # (B, N, 162)
@@ -269,6 +296,8 @@ class KokoroPolicy(nn.Module):
             legal=batch.get("legal") if use_legal else None,
             mood=batch.get("mood"),
             relation=batch.get("relation"),
+            individual=batch.get("individual"),
+            loyalty=batch.get("loyalty"),
         )
 
 
