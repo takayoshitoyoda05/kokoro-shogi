@@ -144,6 +144,13 @@ class KokoroTrunk(nn.Module):
         self.embedding = PieceTokenEmbedding(self.config)
         self.effect_bias = EffectAttentionBias(self.config.n_heads)
 
+        # 感情の合流点 W_m m_i [A] (DESIGN.md §3(1))。フラグOFF時はモジュール自体を
+        # 作らない (state_dict を Phase 1-2 のチェックポイントと同一に保つため)。
+        # 零初期化なので、ONにした直後もフラグOFFと完全に同じ出力から学習が始まる。
+        if self.features.mood:
+            self.mood_proj = nn.Linear(self.config.d_mood, d_model, bias=False)
+            nn.init.zeros_(self.mood_proj.weight)
+
         self.layers = nn.ModuleList(
             KokoroEncoderLayer(d_model, self.config.n_heads, d_model * 4)
             for _ in range(self.config.n_layers)
@@ -159,9 +166,12 @@ class KokoroTrunk(nn.Module):
         mask: Tensor,
         turn: Tensor,
         effect: Tensor | None = None,
+        mood: Tensor | None = None,
     ) -> Tensor:
         batch, tokens = species.shape
         hidden = self.embedding(species, position, owner, promoted, turn)
+        if mood is not None and self.features.mood:
+            hidden = hidden + self.mood_proj(mood)
 
         bias = self._attention_bias(effect, mask, batch, tokens, hidden.dtype)
         for layer in self.layers:

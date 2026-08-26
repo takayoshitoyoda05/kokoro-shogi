@@ -116,7 +116,10 @@ class KokoroPolicy(nn.Module):
             self.desire_head = DesireHead(self.model_config)
             self.free_term_head = FreeTermHead(self.model_config)
             self.personality = PersonalityWeights(
-                self.model_config, num_species=NUM_SPECIES
+                self.model_config,
+                num_species=NUM_SPECIES,
+                # 感情 [A] は性格重みにも合流する ($w_i$ が対局中に動く仕組み)
+                d_mood=self.model_config.d_mood if self.features.mood else 0,
             )
             self.mixing = MonotonicValueMixing(self.model_config, max_pieces=max_pieces)
 
@@ -136,15 +139,16 @@ class KokoroPolicy(nn.Module):
         turn: Tensor,
         effect: Tensor | None = None,
         legal: Tensor | None = None,
+        mood: Tensor | None = None,
     ) -> PolicyOutput:
-        hidden = self.trunk(species, position, owner, promoted, mask, turn, effect)
+        hidden = self.trunk(species, position, owner, promoted, mask, turn, effect, mood)
 
         if self.head == "plain":
             scores = self.policy_head(hidden)
             extra: dict[str, Tensor] = {}
             value = self.value_head(hidden, mask)
         else:
-            scores, extra, value = self._desire_scores(hidden, species, mask)
+            scores, extra, value = self._desire_scores(hidden, species, mask, mood)
 
         scores = scores.masked_fill(~mask[:, :, None, None], ILLEGAL_LOGIT)
         if legal is not None:
@@ -158,12 +162,14 @@ class KokoroPolicy(nn.Module):
         )
 
     def _desire_scores(
-        self, hidden: Tensor, species: Tensor, mask: Tensor
+        self, hidden: Tensor, species: Tensor, mask: Tensor, mood: Tensor | None = None
     ) -> tuple[Tensor, dict[str, Tensor], Tensor]:
         """$s_{i,a} = \\langle w_i, d_i(a)\\rangle + g_i(a)$ (DESIGN.md §3(6) 初期スコア)。"""
         desire = self.desire_head(hidden)  # (B, N, 162, 6)
         free_term = self.free_term_head(hidden)  # (B, N, 162)
-        weights = self.personality(species)  # (B, N, 6)
+        weights = self.personality(
+            species, mood=mood if self.features.mood else None
+        )  # (B, N, 6)
 
         explained = (desire * weights.unsqueeze(2)).sum(dim=-1)  # (B, N, 162)
         scores = explained + free_term
@@ -194,6 +200,7 @@ class KokoroPolicy(nn.Module):
             turn=batch["turn"],
             effect=batch.get("effect"),
             legal=batch.get("legal") if use_legal else None,
+            mood=batch.get("mood"),
         )
 
 
