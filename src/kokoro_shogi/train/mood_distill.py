@@ -41,6 +41,7 @@ from kokoro_shogi.data.dataset import find_shards
 from kokoro_shogi.data.sequence import SequenceDataset, collate_sequences
 from kokoro_shogi.model.mood import MoodGRU, MoodProjection
 from kokoro_shogi.model.policy import KokoroPolicy
+from kokoro_shogi.model.relations import initial_relations, update_relations
 from kokoro_shogi.train.distill import (
     DEFAULT_OUT_DIR,
     DEFAULT_SHARD_DIR,
@@ -68,18 +69,29 @@ _STEP_KEYS = (
 )
 
 
-def build_mood_policy(config: Config, warm_start: Path | None, device: torch.device) -> KokoroPolicy:
-    """features.mood=True の KokoroPolicy を Phase 2 の重みから立ち上げる。"""
-    flags = replace(config.features, mood=True)
+def build_mood_policy(
+    config: Config,
+    warm_start: Path | None,
+    device: torch.device,
+    *,
+    relations: bool = False,
+    council: bool = False,
+) -> KokoroPolicy:
+    """features.mood=True (+任意で relations/council) の KokoroPolicy を
+    Phase 2 の重みから立ち上げる。"""
+    flags = replace(config.features, mood=True, relations=relations, council=council)
     model = KokoroPolicy(config.model, flags, tau=config.loss.tau, head="desire").to(device)
 
     if warm_start is not None:
-        state = torch.load(warm_start, map_location=device, weights_only=True)["model"]
-        # personality.project は mood の連結で入力次元が変わる (16 → 16+d_mood)
-        state = {k: v for k, v in state.items() if not k.startswith("personality.project")}
+        loaded = torch.load(warm_start, map_location=device, weights_only=True)["model"]
+        own = model.state_dict()
+        # 形が合わないキーだけ捨てる (personality.project は mood の連結で
+        # 入力次元が変わることがある。mood 学習済みチェックポイントからなら残る)
+        state = {k: v for k, v in loaded.items() if k in own and own[k].shape == v.shape}
         missing, unexpected = model.load_state_dict(state, strict=False)
         assert not unexpected, unexpected
-        assert all("mood" in k or "personality" in k for k in missing), missing
+        allowed = ("mood", "personality", "relation", "proposal")
+        assert all(any(word in k for word in allowed) for k in missing), missing
     return model
 
 
@@ -92,8 +104,13 @@ def run_epoch(
     *,
     tbptt: int,
     optimizer: torch.optim.Optimizer | None = None,
+    rounds: int | None = None,
 ) -> Metrics:
-    """1エポック。optimizer が None なら評価 (勾配なし)。"""
+    """1エポック。optimizer が None なら評価 (勾配なし)。
+
+    `rounds` は会議 [D] のラウンド数の上書き (評価時の R=0..4 比較用)。
+    None ならモデル既定 (DEFAULT_ROUNDS)。
+    """
     training = optimizer is not None
     policy.train(training)
     gru.train(training)
@@ -104,6 +121,11 @@ def run_epoch(
             batch = move_batch(batch, device)
             games, plies = batch["steps"].shape
             mood = gru.initial_state(games, MAX_PIECES, device=device)
+            relation = (
+                initial_relations(games, MAX_PIECES, device=device)
+                if policy.features.relations
+                else None
+            )
 
             window: list[Tensor] = []
             for t in range(plies):
@@ -111,11 +133,15 @@ def run_epoch(
                 if not bool(active.any()):
                     break
                 mood = gru(batch["events"][:, t], mood)
+                if relation is not None:
+                    relation = update_relations(relation, batch["effect"][:, t])
 
                 rows = active.nonzero(as_tuple=True)[0]
                 step = {key: batch[key][rows, t] for key in _STEP_KEYS}
                 step["mood"] = mood[rows]
-                output = policy.forward_batch(step)
+                if relation is not None:
+                    step["relation"] = relation[rows]
+                output = policy.forward_batch(step, rounds=rounds)
                 loss, metrics = compute_loss(output, step, config)
                 total.update(metrics)
 
@@ -149,6 +175,11 @@ def main() -> None:
     parser.add_argument("--shard-dir", type=Path, default=DEFAULT_SHARD_DIR)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--warm-start", type=Path, default=DEFAULT_WARM_START)
+    parser.add_argument("--relations", action="store_true", help="関係性 [C] を有効化")
+    parser.add_argument("--council", action="store_true", help="会議 [D] を有効化")
+    parser.add_argument(
+        "--out-name", default="mood_distill", help="チェックポイントのファイル名 (拡張子なし)"
+    )
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--games-per-batch", type=int, default=16)
     parser.add_argument("--tbptt", type=int, default=16, help="逆伝播を切る手数")
@@ -179,9 +210,18 @@ def main() -> None:
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, **loader_args)
 
-    policy = build_mood_policy(config, args.warm_start, device)
+    policy = build_mood_policy(
+        config, args.warm_start, device, relations=args.relations, council=args.council
+    )
     gru = MoodGRU(config.model).to(device)
     projection = MoodProjection(config.model).to(device)  # 未学習のまま同梱 (後で回帰)
+    # ウォームスタート元に学習済みGRU/射影があれば引き継ぐ
+    if args.warm_start is not None and args.warm_start.exists():
+        warm = torch.load(args.warm_start, map_location=device, weights_only=True)
+        if "mood_gru" in warm:
+            gru.load_state_dict(warm["mood_gru"])
+        if "mood_projection" in warm:
+            projection.load_state_dict(warm["mood_projection"])
     optimizer = torch.optim.AdamW(
         [*policy.parameters(), *gru.parameters()], lr=args.lr, weight_decay=args.weight_decay
     )
@@ -212,11 +252,12 @@ def main() -> None:
                 "mood_gru": gru.state_dict(),
                 "mood_projection": projection.state_dict(),
                 "warm_start": str(args.warm_start),
+                "features": {"relations": args.relations, "council": args.council},
             },
-            args.out_dir / "mood_distill.pt",
+            args.out_dir / f"{args.out_name}.pt",
         )
 
-    (args.out_dir / "mood_distill_history.json").write_text(
+    (args.out_dir / f"{args.out_name}_history.json").write_text(
         json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 

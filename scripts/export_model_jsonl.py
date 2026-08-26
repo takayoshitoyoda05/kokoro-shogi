@@ -34,23 +34,34 @@ import torch
 from gen_sample_jsonl import MoodHeuristics, build_career, round3
 from kokoro_shogi.config import REPO_ROOT, load_config
 from kokoro_shogi.model.mood import MoodGRU, MoodProjection, build_event_features
+from kokoro_shogi.model.relations import initial_relations, update_relations
 from kokoro_shogi.core.effects import piece_effect_matrix
 from kokoro_shogi.core.piece_state import MoveRecord, PieceIdTracker, PieceState
-from kokoro_shogi.core.pieces import BLACK, base_species, SPECIES_ORDER, HAND_INDEX_TO_SPECIES
-from kokoro_shogi.core.squares import NUM_SQUARES
+from kokoro_shogi.core.pieces import (
+    BLACK,
+    HAND_INDEX_TO_SPECIES,
+    SPECIES_ORDER,
+    SPECIES_TO_SFEN_LETTER,
+    base_species,
+)
+from kokoro_shogi.core.squares import NUM_SQUARES, str_to_sq
 from kokoro_shogi.core.tokenizer import MAX_PIECES, PieceTokenizer, TokenizedPosition, to_sfen
 from kokoro_shogi.data.dataset import NUM_PROMOTE, legal_move_mask
 from kokoro_shogi.data.labels import DESIRE_AXES
 from kokoro_shogi.logging.jsonl import (
+    CouncilRound,
     Desire,
     JsonlWriter,
     LastMove,
     Mood,
     PieceInfo,
+    Proposal,
+    Relation,
     StateUpdate,
     to_json_line,
 )
 from kokoro_shogi.model.policy import KokoroPolicy
+from kokoro_shogi.viz.narrator import TemplateNarrator
 
 DEFAULT_GAMES = 10
 DEFAULT_MAX_PLIES = 140
@@ -117,9 +128,16 @@ class ModelRunner:
         self.gru: MoodGRU | None = None
         self.projection: MoodProjection | None = None
 
+        self.relations = False
+        self.council = False
         if mood_checkpoint is not None:
             state = torch.load(mood_checkpoint, map_location=device, weights_only=True)
-            flags = replace(config.features, mood=True)
+            saved = state.get("features", {})
+            self.relations = bool(saved.get("relations", False))
+            self.council = bool(saved.get("council", False))
+            flags = replace(
+                config.features, mood=True, relations=self.relations, council=self.council
+            )
             self.model = KokoroPolicy(
                 config.model, flags, tau=config.loss.tau, head="desire"
             ).to(device)
@@ -138,13 +156,19 @@ class ModelRunner:
 
     @torch.no_grad()
     def forward(
-        self, board: cshogi.Board, tokens: TokenizedPosition, mood: torch.Tensor | None = None
+        self,
+        board: cshogi.Board,
+        tokens: TokenizedPosition,
+        mood: torch.Tensor | None = None,
+        relation: torch.Tensor | None = None,
+        effect: np.ndarray | None = None,
     ):
         """モデルを1回走らせて (PolicyOutput, 合法手マスク) を返す。"""
         legal = legal_move_mask(
             board, tokens.position, tokens.owner, tokens.species, tokens.mask
         )
-        effect = piece_effect_matrix(board, tokens.squares()).astype(np.int64)
+        if effect is None:
+            effect = piece_effect_matrix(board, tokens.squares()).astype(np.int64)
 
         as_long = lambda array: torch.from_numpy(array.astype(np.int64))[None].to(self.device)
         output = self.model(
@@ -157,6 +181,7 @@ class ModelRunner:
             effect=torch.from_numpy(effect)[None].to(self.device),
             legal=torch.from_numpy(legal)[None].to(self.device),
             mood=mood,
+            relation=relation,
         )
         return output, legal
 
@@ -188,6 +213,7 @@ def desires_for_all_pieces(
     output,
     legal: np.ndarray,
     mood: torch.Tensor | None = None,
+    relation: torch.Tensor | None = None,
 ) -> list[Desire]:
     """全40駒の desire。手番でない側は手番を反転した盤面でもう1回 forward する。"""
     by_token = runner.piece_desires(output, legal)
@@ -204,7 +230,7 @@ def desires_for_all_pieces(
     )
     try:
         flipped_board = cshogi.Board(to_sfen(flipped))
-        flipped_output, flipped_legal = runner.forward(flipped_board, flipped, mood)
+        flipped_output, flipped_legal = runner.forward(flipped_board, flipped, mood, relation)
         for index, value in runner.piece_desires(flipped_output, flipped_legal).items():
             by_token.setdefault(index, value)
     except Exception:
@@ -220,6 +246,56 @@ def desires_for_all_pieces(
     return desires
 
 
+def usi_square(square: int) -> str:
+    """cshogi マス番号 → USI表記 ("76" のマスなら "7f")。"""
+    return f"{square // 9 + 1}{chr(ord('a') + square % 9)}"
+
+
+def proposal_move_str(state: PieceState, to_square: int, promote: int) -> str:
+    """提案 (駒, 移動先, 成り) → USI手表記 (INTERFACE.md の council.move)。"""
+    dest = usi_square(to_square)
+    if state.in_hand:
+        return f"{SPECIES_TO_SFEN_LETTER[state.base_species]}*{dest}"
+    return usi_square(str_to_sq(state.square)) + dest + ("+" if promote else "")
+
+
+def council_rounds_from_output(output, states: list[PieceState]) -> list[CouncilRound]:
+    """PolicyOutput.council (テンソルの議事録) → INTERFACE.md §3 の council。"""
+    if not output.council:
+        return []
+    rounds: list[CouncilRound] = []
+    for number, log in enumerate(output.council, start=1):
+        proposals = []
+        for token, move_kind, bid in zip(
+            log.token[0].tolist(), log.move_kind[0].tolist(), log.bid[0].tolist(), strict=True
+        ):
+            if bid < -1e8:
+                continue  # 合法手が top-k より少ない局面の詰め物
+            state = states[token]
+            proposals.append(
+                Proposal(
+                    piece_id=state.piece_id,
+                    move=proposal_move_str(state, move_kind // 2, move_kind % 2),
+                    bid=round3(float(bid)),
+                )
+            )
+        rounds.append(CouncilRound(round=number, proposals=proposals))
+    return rounds
+
+
+def relations_from_state(
+    relation: torch.Tensor, index: int, states: list[PieceState]
+) -> list[Relation]:
+    """関係状態 R の行 → INTERFACE.md の relations (r ≥ 0.3、最大5件)。"""
+    row = relation[0, index]
+    values, partners = row.topk(min(5, row.shape[0]))
+    return [
+        Relation(to=states[j].piece_id, r=round3(min(1.0, float(v))))
+        for v, j in zip(values.tolist(), partners.tolist(), strict=True)
+        if v >= 0.3 and j != index
+    ]
+
+
 def build_state_update(
     runner: ModelRunner,
     board: cshogi.Board,
@@ -230,6 +306,9 @@ def build_state_update(
     legal: np.ndarray,
     tokens: TokenizedPosition,
     mood_state: torch.Tensor | None = None,
+    relation_state: torch.Tensor | None = None,
+    council: list[CouncilRound] | None = None,
+    narration: str = "",
 ) -> StateUpdate:
     """`board` は指した後の局面。desire/alpha/eval がモデル出力になる。"""
     # value は手番側視点 (make_labels の z と同じ) なので先手視点へ直す
@@ -237,7 +316,9 @@ def build_state_update(
     evaluation = round3(value if tokens.turn == BLACK else -value)
 
     heuristics = MoodHeuristics(board, tracker, evaluation)
-    desires = desires_for_all_pieces(runner, board, tokens, output, legal, mood_state)
+    desires = desires_for_all_pieces(
+        runner, board, tokens, output, legal, mood_state, relation_state
+    )
     alpha = output.alpha[0].cpu().numpy()
 
     projected = None
@@ -257,6 +338,10 @@ def build_state_update(
             )
         else:
             mood = heuristics.mood(state)
+        if relation_state is not None:
+            relations = relations_from_state(relation_state, index, states)
+        else:
+            relations = heuristics.relations(state)
         pieces.append(
             PieceInfo(
                 piece_id=state.piece_id,
@@ -266,7 +351,7 @@ def build_state_update(
                 mood=mood,
                 desire=desires[index],
                 alpha=round3(float(alpha[index])),
-                relations=heuristics.relations(state),
+                relations=relations,
             )
         )
 
@@ -287,8 +372,8 @@ def build_state_update(
         last_move=last_move,
         eval=evaluation,
         pieces=pieces,
-        council=[],
-        narration="",
+        council=council or [],
+        narration=narration,
     )
 
 
@@ -315,10 +400,14 @@ def generate_game(
     generator = torch.Generator().manual_seed(seed)
     board = cshogi.Board()
     tracker = PieceIdTracker(board)
+    narrator = TemplateNarrator()
 
     ply = 0
     record: MoveRecord | None = None
     mood_state: torch.Tensor | None = None
+    relation_state: torch.Tensor | None = None
+    #: 直前の手を選んだ会議 (state_update の council は「その手が決まるまでの議事録」)
+    prev_council: list[CouncilRound] = []
     with JsonlWriter(path) as writer:
         while True:
             if runner.gru is not None:
@@ -331,15 +420,34 @@ def generate_game(
                         torch.from_numpy(events)[None].to(runner.device), mood_state
                     )
             tokens = runner.tokenizer.tokenize(board, tracker)
-            output, legal = runner.forward(board, tokens, mood_state)
+            effect = piece_effect_matrix(board, tokens.squares()).astype(np.int64)
+            if runner.relations:
+                if relation_state is None:
+                    relation_state = initial_relations(1, MAX_PIECES, device=runner.device)
+                relation_state = update_relations(
+                    relation_state, torch.from_numpy(effect)[None].to(runner.device)
+                )
+            output, legal = runner.forward(board, tokens, mood_state, relation_state, effect)
+
+            narration = ""
+            if prev_council and record is not None:
+                meta = {
+                    state.piece_id: (state.species, state.owner)
+                    for state in tracker.states.values()
+                }
+                narration = narrator.narrate(prev_council, record.piece_id, meta)
             writer.write(
                 build_state_update(
-                    runner, board, tracker, ply, record, output, legal, tokens, mood_state
+                    runner, board, tracker, ply, record, output, legal, tokens,
+                    mood_state, relation_state, prev_council, narration,
                 )
             )
             if ply >= max_plies or board.is_game_over() or not legal.any():
                 break
             move = sample_move(output, build_action_map(board, tokens), tau, generator)
+            # 会議ログはこの手を選んだ審議。次のstate_updateに載せる
+            states = sorted(tracker.states.values(), key=lambda item: item.piece_id)
+            prev_council = council_rounds_from_output(output, states)
             record = tracker.apply_move(board, move)
             board.push(move)
             ply += 1
@@ -372,8 +480,12 @@ def main() -> None:
 
     runner = ModelRunner(args.checkpoint, device, mood_checkpoint=args.mood_checkpoint)
     source = args.mood_checkpoint.name if args.mood_checkpoint else args.checkpoint.name
-    print(f"checkpoint: {source} / device: {device} / mood: "
-          + ("感情GRU" if runner.gru is not None else "ヒューリスティック"))
+    print(
+        f"checkpoint: {source} / device: {device}"
+        f" / mood: {'感情GRU' if runner.gru is not None else 'ヒューリスティック'}"
+        f" / relations: {'r_ij状態' if runner.relations else 'ヒューリスティック'}"
+        f" / council: {'ON' if runner.council else 'OFF'}"
+    )
 
     results: list[dict[str, PieceState]] = []
     promotions: dict[str, int] = {}

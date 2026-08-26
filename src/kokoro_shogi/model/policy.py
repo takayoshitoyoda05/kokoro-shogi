@@ -63,6 +63,8 @@ class PolicyOutput:
     alpha: Tensor | None = None
     #: 駒ごとの価値 $V_i$ `(B, N)`
     piece_value: Tensor | None = None
+    #: 会議 [D] の議事録 (ラウンドごとの top-k 提案)。会議OFF時は None
+    council: tuple[Any, ...] | None = None
 
     def log_probs(self, tau: float = 1.0) -> Tensor:
         """温度付きの対数確率 `(B, A)`。"""
@@ -115,6 +117,16 @@ class KokoroPolicy(nn.Module):
         else:
             self.desire_head = DesireHead(self.model_config)
             self.free_term_head = FreeTermHead(self.model_config)
+            if self.features.council:
+                from kokoro_shogi.model.council import (
+                    DEFAULT_ROUNDS,
+                    DEFAULT_TOP_K,
+                    ProposalEmbedding,
+                )
+
+                self.proposal_embed = ProposalEmbedding(self.model_config)
+                self.council_rounds = DEFAULT_ROUNDS
+                self.council_top_k = DEFAULT_TOP_K
             self.personality = PersonalityWeights(
                 self.model_config,
                 num_species=NUM_SPECIES,
@@ -140,26 +152,78 @@ class KokoroPolicy(nn.Module):
         effect: Tensor | None = None,
         legal: Tensor | None = None,
         mood: Tensor | None = None,
+        relation: Tensor | None = None,
+        rounds: int | None = None,
     ) -> PolicyOutput:
-        hidden = self.trunk(species, position, owner, promoted, mask, turn, effect, mood)
+        hidden = self.trunk(
+            species, position, owner, promoted, mask, turn, effect, mood, relation
+        )
 
+        council = None
         if self.head == "plain":
             scores = self.policy_head(hidden)
             extra: dict[str, Tensor] = {}
             value = self.value_head(hidden, mask)
         else:
             scores, extra, value = self._desire_scores(hidden, species, mask, mood)
+            if self.features.council:
+                hidden, scores, extra, value, council = self._council(
+                    hidden, scores, extra, value, species, mask, legal,
+                    effect, mood, relation, rounds,
+                )
 
-        scores = scores.masked_fill(~mask[:, :, None, None], ILLEGAL_LOGIT)
-        if legal is not None:
-            scores = scores.masked_fill(~legal, ILLEGAL_LOGIT)
-
+        scores = self._mask_scores(scores, mask, legal)
         return PolicyOutput(
             logits=scores.flatten(start_dim=1),
             value=value,
             hidden=hidden,
+            council=council,
             **extra,
         )
+
+    @staticmethod
+    def _mask_scores(scores: Tensor, mask: Tensor, legal: Tensor | None) -> Tensor:
+        scores = scores.masked_fill(~mask[:, :, None, None], ILLEGAL_LOGIT)
+        if legal is not None:
+            scores = scores.masked_fill(~legal, ILLEGAL_LOGIT)
+        return scores
+
+    def _council(
+        self,
+        hidden: Tensor,
+        scores: Tensor,
+        extra: dict[str, Tensor],
+        value: Tensor,
+        species: Tensor,
+        mask: Tensor,
+        legal: Tensor | None,
+        effect: Tensor | None,
+        mood: Tensor | None,
+        relation: Tensor | None,
+        rounds: int | None,
+    ):
+        """会議調停 [D] (DESIGN.md §3(6))。
+
+        重み共有なので `rounds` は推論時に自由に変えられる (Gate の R=1..4 比較)。
+        各ラウンドの提案は**そのラウンド開始時点のスコア** $s^{(r-1)}$ で選ぶ。
+        """
+        from kokoro_shogi.model.council import CouncilRoundLog, top_proposals
+
+        resolved = self.council_rounds if rounds is None else rounds
+        logs: list[CouncilRoundLog] = []
+        for _ in range(resolved):
+            masked = self._mask_scores(scores, mask, legal)
+            token, move_kind, bid = top_proposals(
+                masked.flatten(start_dim=2), self.council_top_k
+            )
+            proposals = self.proposal_embed(hidden, token, move_kind, bid)
+            hidden = self.trunk.reapply_last_layers(
+                hidden, proposals, mask, effect, relation
+            )
+            scores, extra, value = self._desire_scores(hidden, species, mask, mood)
+            logs.append(CouncilRoundLog(token=token, move_kind=move_kind, bid=bid))
+
+        return hidden, scores, extra, value, tuple(logs)
 
     def _desire_scores(
         self, hidden: Tensor, species: Tensor, mask: Tensor, mood: Tensor | None = None
@@ -189,9 +253,12 @@ class KokoroPolicy(nn.Module):
             value,
         )
 
-    def forward_batch(self, batch: dict[str, Any], *, use_legal: bool = True) -> PolicyOutput:
+    def forward_batch(
+        self, batch: dict[str, Any], *, use_legal: bool = True, rounds: int | None = None
+    ) -> PolicyOutput:
         """`data/dataset.collate` が作った辞書をそのまま食う。"""
         return self(
+            rounds=rounds,
             species=batch["species"],
             position=batch["position"],
             owner=batch["owner"],
@@ -201,6 +268,7 @@ class KokoroPolicy(nn.Module):
             effect=batch.get("effect"),
             legal=batch.get("legal") if use_legal else None,
             mood=batch.get("mood"),
+            relation=batch.get("relation"),
         )
 
 

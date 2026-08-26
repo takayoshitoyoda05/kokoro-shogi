@@ -151,6 +151,12 @@ class KokoroTrunk(nn.Module):
             self.mood_proj = nn.Linear(self.config.d_mood, d_model, bias=False)
             nn.init.zeros_(self.mood_proj.weight)
 
+        # 関係性 r_ij [C] (DESIGN.md §3(2))。B_利き と同じ挿入位置・同じ零初期化流儀
+        if self.features.relations:
+            from kokoro_shogi.model.relations import RelationAttentionBias
+
+            self.relation_bias = RelationAttentionBias(self.config.n_heads)
+
         self.layers = nn.ModuleList(
             KokoroEncoderLayer(d_model, self.config.n_heads, d_model * 4)
             for _ in range(self.config.n_layers)
@@ -167,21 +173,64 @@ class KokoroTrunk(nn.Module):
         turn: Tensor,
         effect: Tensor | None = None,
         mood: Tensor | None = None,
+        relation: Tensor | None = None,
     ) -> Tensor:
         batch, tokens = species.shape
         hidden = self.embedding(species, position, owner, promoted, turn)
         if mood is not None and self.features.mood:
             hidden = hidden + self.mood_proj(mood)
 
-        bias = self._attention_bias(effect, mask, batch, tokens, hidden.dtype)
+        bias = self._attention_bias(effect, mask, batch, tokens, hidden.dtype, relation)
+        flat_bias = bias.reshape(batch * self.config.n_heads, tokens, tokens)
         for layer in self.layers:
-            hidden = layer(hidden, attn_mask=bias)
+            hidden = layer(hidden, attn_mask=flat_bias)
         hidden = self.norm(hidden)
 
         return hidden * mask.unsqueeze(-1)
 
+    def reapply_last_layers(
+        self,
+        hidden: Tensor,
+        proposals: Tensor,
+        mask: Tensor,
+        effect: Tensor | None = None,
+        relation: Tensor | None = None,
+        *,
+        depth: int = 2,
+    ) -> Tensor:
+        """会議 [D]: $[h; P]$ に最終 `depth` 層を**重み共有**で再適用する。
+
+        提案トークンは全駒から参照でき (keyを塞がない)、利き/関係バイアスは
+        駒×駒の左上ブロックにだけ載る。出力は駒トークン側 `(B, N, d)` のみ
+        (提案トークンの出力は捨てる)。
+        """
+        batch, tokens = mask.shape
+        extras = proposals.shape[1]
+        total = tokens + extras
+        heads = self.config.n_heads
+
+        bias = torch.zeros(
+            batch, heads, total, total, dtype=hidden.dtype, device=hidden.device
+        )
+        bias[:, :, :tokens, :tokens] = self._attention_bias(
+            effect, mask, batch, tokens, hidden.dtype, relation
+        )
+
+        extended = torch.cat([hidden, proposals], dim=1)
+        flat_bias = bias.reshape(batch * heads, total, total)
+        for layer in self.layers[-depth:]:
+            extended = layer(extended, attn_mask=flat_bias)
+
+        return self.norm(extended[:, :tokens]) * mask.unsqueeze(-1)
+
     def _attention_bias(
-        self, effect: Tensor | None, mask: Tensor, batch: int, tokens: int, dtype: torch.dtype
+        self,
+        effect: Tensor | None,
+        mask: Tensor,
+        batch: int,
+        tokens: int,
+        dtype: torch.dtype,
+        relation: Tensor | None = None,
     ) -> Tensor:
         """加算attentionマスク `(B * n_heads, N, N)` を組み立てる。
 
@@ -195,12 +244,15 @@ class KokoroTrunk(nn.Module):
         else:
             bias = torch.zeros(batch, heads, tokens, tokens, dtype=dtype, device=mask.device)
 
+        if relation is not None and self.features.relations:
+            bias = bias + self.relation_bias(relation).to(dtype)
+
         # 無効トークンは「参照される側 (key)」だけを塞ぐ。query側を塞がないので
         # 全キーが -inf になる行は生まれず、softmax が NaN にならない。
         blocked = torch.zeros_like(bias)
         blocked.masked_fill_(~mask[:, None, None, :], float("-inf"))
 
-        return (bias + blocked).reshape(batch * heads, tokens, tokens)
+        return bias + blocked  # (B, n_heads, N, N)。reshape は呼び出し側
 
 
 __all__ = [
