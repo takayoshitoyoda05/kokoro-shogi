@@ -430,6 +430,9 @@ public class GameSceneDirector : MonoBehaviour
     //ユニットとタイル選択
     void selectMode()
     {
+        //モード選択画面の表示中は、背後の盤や駒をクリックさせない
+        if (!ModeSelectionManager.IsWorldInteractionAllowed) return;
+
         GameObject tile = null;
         UnitController unit = null;
 
