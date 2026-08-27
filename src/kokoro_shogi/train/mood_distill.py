@@ -74,12 +74,15 @@ def build_mood_policy(
     warm_start: Path | None,
     device: torch.device,
     *,
+    mood: bool = True,
     relations: bool = False,
     council: bool = False,
 ) -> KokoroPolicy:
-    """features.mood=True (+任意で relations/council) の KokoroPolicy を
-    Phase 2 の重みから立ち上げる。"""
-    flags = replace(config.features, mood=True, relations=relations, council=council)
+    """機能フラグ組合せの KokoroPolicy を Phase 2 の重みから立ち上げる。
+
+    `mood=False` はアブレーション (§8: A/C/D の全組合せ表) の計測用。
+    """
+    flags = replace(config.features, mood=mood, relations=relations, council=council)
     model = KokoroPolicy(config.model, flags, tau=config.loss.tau, head="desire").to(device)
 
     if warm_start is not None:
@@ -120,7 +123,11 @@ def run_epoch(
         for batch in loader:
             batch = move_batch(batch, device)
             games, plies = batch["steps"].shape
-            mood = gru.initial_state(games, MAX_PIECES, device=device)
+            mood = (
+                gru.initial_state(games, MAX_PIECES, device=device)
+                if policy.features.mood
+                else None
+            )
             relation = (
                 initial_relations(games, MAX_PIECES, device=device)
                 if policy.features.relations
@@ -132,13 +139,15 @@ def run_epoch(
                 active = batch["steps"][:, t]
                 if not bool(active.any()):
                     break
-                mood = gru(batch["events"][:, t], mood)
+                if mood is not None:
+                    mood = gru(batch["events"][:, t], mood)
                 if relation is not None:
                     relation = update_relations(relation, batch["effect"][:, t])
 
                 rows = active.nonzero(as_tuple=True)[0]
                 step = {key: batch[key][rows, t] for key in _STEP_KEYS}
-                step["mood"] = mood[rows]
+                if mood is not None:
+                    step["mood"] = mood[rows]
                 if relation is not None:
                     step["relation"] = relation[rows]
                 output = policy.forward_batch(step, rounds=rounds)
@@ -149,7 +158,8 @@ def run_epoch(
                     window.append(loss)
                     if len(window) >= tbptt:
                         _flush_window(window, policy, gru, optimizer)
-                        mood = mood.detach()
+                        if mood is not None:
+                            mood = mood.detach()
 
             if training and window:
                 _flush_window(window, policy, gru, optimizer)
@@ -177,6 +187,9 @@ def main() -> None:
     parser.add_argument("--warm-start", type=Path, default=DEFAULT_WARM_START)
     parser.add_argument("--relations", action="store_true", help="関係性 [C] を有効化")
     parser.add_argument("--council", action="store_true", help="会議 [D] を有効化")
+    parser.add_argument(
+        "--no-mood", action="store_true", help="感情 [A] を無効化 (アブレーション計測用)"
+    )
     parser.add_argument(
         "--out-name", default="mood_distill", help="チェックポイントのファイル名 (拡張子なし)"
     )
@@ -211,7 +224,8 @@ def main() -> None:
     val_loader = DataLoader(val_set, shuffle=False, **loader_args)
 
     policy = build_mood_policy(
-        config, args.warm_start, device, relations=args.relations, council=args.council
+        config, args.warm_start, device,
+        mood=not args.no_mood, relations=args.relations, council=args.council,
     )
     gru = MoodGRU(config.model).to(device)
     projection = MoodProjection(config.model).to(device)  # 未学習のまま同梱 (後で回帰)
@@ -255,7 +269,11 @@ def main() -> None:
                 "mood_gru": gru.state_dict(),
                 "mood_projection": projection.state_dict(),
                 "warm_start": str(args.warm_start),
-                "features": {"relations": args.relations, "council": args.council},
+                "features": {
+                    "mood": not args.no_mood,
+                    "relations": args.relations,
+                    "council": args.council,
+                },
             },
             args.out_dir / f"{args.out_name}.pt",
         )
