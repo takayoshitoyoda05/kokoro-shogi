@@ -330,11 +330,16 @@ def build_state_update(
     states = sorted(tracker.states.values(), key=lambda item: item.piece_id)
     for index, state in enumerate(states):  # トークンも piece_id 順なので index が一致
         if projected is not None:
-            fear, aggression, valence = projected[index]
+            fear, aggression, _ = projected[index]
+            # valence の形勢成分は m_i の読み出しではなくモデルの V から直接取る。
+            # GRU状態の形勢情報は R²≈0.21 と弱い (形勢は trunk 側が持つため)。
+            # 合成式はヒューリスティックの valence と同型 (ADR 2026-08-27)
+            side_eval = evaluation if state.owner == 0 else -evaluation
+            valence = max(-1.0, min(1.0, side_eval - 0.4 * float(fear) + 0.2 * float(aggression)))
             mood = Mood(
                 fear=round3(float(fear)),
                 aggression=round3(float(aggression)),
-                valence=round3(float(valence)),
+                valence=round3(valence),
             )
         else:
             mood = heuristics.mood(state)

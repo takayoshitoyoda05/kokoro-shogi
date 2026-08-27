@@ -29,7 +29,7 @@ import cshogi
 import numpy as np
 import torch
 
-from gen_sample_jsonl import MoodHeuristics
+from gen_sample_jsonl import MoodHeuristics, material_eval
 from kokoro_shogi.config import REPO_ROOT, load_config
 from kokoro_shogi.core.piece_state import PieceIdTracker
 from kokoro_shogi.core.tokenizer import MAX_PIECES
@@ -63,8 +63,10 @@ def collect_pairs(
                 events = torch.from_numpy(game.events[t])[None].to(device)
                 mood = gru(events, mood)
 
-                # ヒューリスティック教師 (評価値は使わない軸だけなので0でよい)
-                heuristics = MoodHeuristics(board, tracker, evaluation=0.0)
+                # ヒューリスティック教師。valence は形勢に依存するので、
+                # 駒得ベースの形勢 (material_eval) を渡す (0にすると教師の
+                # valence から形勢成分が消え、GRUの形勢信号を測れない)
+                heuristics = MoodHeuristics(board, tracker, material_eval(board, tracker))
                 ordered = sorted(tracker.states.values(), key=lambda item: item.piece_id)
                 target = np.array(
                     [
