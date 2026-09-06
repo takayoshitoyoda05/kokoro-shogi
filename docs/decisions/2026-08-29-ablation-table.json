@@ -1,0 +1,42 @@
+[
+  {
+    "config": "none",
+    "accuracy": 0.342,
+    "explained_ratio": 0.7767
+  },
+  {
+    "config": "a",
+    "accuracy": 0.3491,
+    "explained_ratio": 0.7586
+  },
+  {
+    "config": "c",
+    "accuracy": 0.3506,
+    "explained_ratio": 0.7796
+  },
+  {
+    "config": "d",
+    "accuracy": 0.332,
+    "explained_ratio": 0.7933
+  },
+  {
+    "config": "ac",
+    "accuracy": 0.3542,
+    "explained_ratio": 0.7557
+  },
+  {
+    "config": "ad",
+    "accuracy": 0.344,
+    "explained_ratio": 0.6981
+  },
+  {
+    "config": "cd",
+    "accuracy": 0.3384,
+    "explained_ratio": 0.8054
+  },
+  {
+    "config": "acd",
+    "accuracy": 0.3437,
+    "explained_ratio": 0.6908
+  }
+]

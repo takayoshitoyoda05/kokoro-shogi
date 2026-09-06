@@ -7,9 +7,10 @@ import queue
 import socket
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
-from typing import Any, Callable
+from typing import Any
 
 from kokoro_shogi.server import server as ws_server
 
@@ -63,7 +64,9 @@ class ServerGUI(tk.Tk):
         self.port_entry = ttk.Entry(server_frame, textvariable=self.port_var, width=8)
         self.port_entry.grid(row=0, column=3, padx=(0, 12))
 
-        self.start_button = ttk.Button(server_frame, text="サーバー起動", command=self._start_server)
+        self.start_button = ttk.Button(
+            server_frame, text="サーバー起動", command=self._start_server
+        )
         self.start_button.grid(row=0, column=4, padx=(0, 6))
 
         self.stop_button = ttk.Button(server_frame, text="サーバー終了", command=self._stop_server)
@@ -87,7 +90,9 @@ class ServerGUI(tk.Tk):
 
         self.client_list = tk.Listbox(clients_frame, exportselection=False)
         self.client_list.grid(row=0, column=0, sticky="nsew")
-        client_scroll = ttk.Scrollbar(clients_frame, orient=tk.VERTICAL, command=self.client_list.yview)
+        client_scroll = ttk.Scrollbar(
+            clients_frame, orient=tk.VERTICAL, command=self.client_list.yview
+        )
         client_scroll.grid(row=0, column=1, sticky="ns")
         self.client_list.configure(yscrollcommand=client_scroll.set)
 
@@ -216,7 +221,9 @@ class ServerGUI(tk.Tk):
         self._set_running_ui(False)
         self.status_var.set("停止中")
         self.server_address_var.set("接続先: サーバー未起動")
-        self._append_log("[SERVER] サーバーを終了しました。" if stopped else "[SERVER] すでに停止中です。")
+        self._append_log(
+            "[SERVER] サーバーを終了しました。" if stopped else "[SERVER] すでに停止中です。"
+        )
 
     def _browse_json(self) -> None:
         path = filedialog.askopenfilename(

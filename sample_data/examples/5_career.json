@@ -1,0 +1,34 @@
+{
+  "schema": "1.0",
+  "type": "career",
+  "pieces": [
+    {
+      "piece_id": "P77_gen0_0003",
+      "species": "FU",
+      "games": 120,
+      "survival_rate": 0.42,
+      "promotions": 18,
+      "mvp_count": 3
+    },
+    {
+      "piece_id": "R28_gen0_0011",
+      "species": "HI",
+      "games": 120,
+      "survival_rate": 0.78,
+      "promotions": 55,
+      "mvp_count": 21
+    },
+    {
+      "piece_id": "B88_gen0_0010",
+      "species": "KA",
+      "games": 118,
+      "survival_rate": 0.61,
+      "promotions": 40,
+      "mvp_count": 9
+    }
+  ],
+  "last_game_mvp": {
+    "piece_id": "R28_gen0_0011",
+    "contribution": 2.3
+  }
+}

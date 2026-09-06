@@ -6,3 +6,8 @@
 *.wav   filter=lfs diff=lfs merge=lfs -text
 *.mp3   filter=lfs diff=lfs merge=lfs -text
 *.blend filter=lfs diff=lfs merge=lfs -text
+
+# サンプル/実データJSONL (AI→Unity の納品物)
+# 1局あたり約1.6MB。INTERFACE.md §7 はスキーマ変更のたびに再生成を求めるため、
+# 通常のGit管理だとその都度リポジトリ履歴が数MB単位で増える。
+sample_data/*.jsonl filter=lfs diff=lfs merge=lfs -text

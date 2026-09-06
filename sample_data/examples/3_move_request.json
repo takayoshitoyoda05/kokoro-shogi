@@ -1,0 +1,9 @@
+{
+  "schema": "1.0",
+  "type": "move_request",
+  "move": {
+    "from": "77",
+    "to": "76",
+    "promote": false
+  }
+}

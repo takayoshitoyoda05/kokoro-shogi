@@ -1,0 +1,26 @@
+{
+  "schema": "1.0",
+  "type": "legal_moves",
+  "moves": [
+    {
+      "from": "77",
+      "to": "76",
+      "promote": false
+    },
+    {
+      "from": "27",
+      "to": "26",
+      "promote": false
+    },
+    {
+      "from": "88",
+      "to": "22",
+      "promote": true
+    },
+    {
+      "from": "00",
+      "to": "55",
+      "drop_species": "FU"
+    }
+  ]
+}
