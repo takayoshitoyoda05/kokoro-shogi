@@ -17,8 +17,10 @@ $L_{desire}$ の教師は自己対戦の棋譜から `data/labels.compute_desire
 
 割り切り (10週縮退版):
 
-- **感情GRUは凍結**し、mood/relation は観測の一部として扱う (BPTTなし。
-  GRU自体の更新は系列蒸留 train/mood_distill.py の担当)
+- **感情GRUは既定で凍結**し、mood/relation は観測の一部として扱う (BPTTなし。
+  GRU自体の更新は系列蒸留 train/mood_distill.py の担当)。2026-09-06 追加の
+  ``--train-gru`` (E4) は truncated BPTT (``--bptt`` 手) で感情を勾配付きに
+  再計算して GRU も更新し、凍結 GRU の感情との MSE (``--anchor``) で繋ぎ止める
 - 打ち切り局は引き分け (z=0)
 - Gate は「兆候が見える」= 凍結した開始時スナップショットとの対戦勝率
 
@@ -48,7 +50,7 @@ from kokoro_shogi.core.squares import NUM_SQUARES
 from kokoro_shogi.core.tokenizer import MAX_PIECES, PieceTokenizer
 from kokoro_shogi.data.dataset import NUM_PROMOTE, legal_move_mask
 from kokoro_shogi.data.labels import compute_desire_labels
-from kokoro_shogi.model.mood import MoodGRU, build_event_features
+from kokoro_shogi.model.mood import NUM_EVENT_FEATURES, MoodGRU, build_event_features
 from kokoro_shogi.model.policy import KokoroPolicy
 from kokoro_shogi.model.relations import initial_relations, update_relations
 from kokoro_shogi.train.distill import DEFAULT_OUT_DIR, Metrics, desire_bce, free_term_l2, resolve_device
@@ -63,12 +65,27 @@ CLIP_EPSILON = 0.2
 class SelfPlayEnv:
     """1面ぶんの自己対戦状態 (盤 + tracker + mood/relation)。"""
 
-    def __init__(self, model: KokoroPolicy, gru: MoodGRU, device: torch.device) -> None:
+    def __init__(
+        self,
+        model: KokoroPolicy,
+        gru: MoodGRU,
+        device: torch.device,
+        *,
+        gru_ref: MoodGRU | None = None,
+        bptt: int = 0,
+    ) -> None:
         self.board = cshogi.Board()
         self.tracker = PieceIdTracker(self.board)
         self.tokenizer = PieceTokenizer()
         self.device = device
         self.mood = gru.initial_state(1, MAX_PIECES, device=device)
+        # GRU 解凍 (E4) 用: 凍結 GRU の感情列を並走させる (相手側 / anchor の参照)。
+        # bptt > 0 なら再計算に必要な (K 手前の状態, その後のイベント列) を観測に残す
+        self.gru_ref = gru_ref
+        self.mood_ref = gru.initial_state(1, MAX_PIECES, device=device) if gru_ref else None
+        self.bptt = bptt
+        self.past_moods: list[np.ndarray] = [self.mood[0].cpu().numpy()]
+        self.past_events: list[np.ndarray] = []
         self.relation = (
             initial_relations(1, MAX_PIECES, device=device) if model.features.relations else None
         )
@@ -89,7 +106,13 @@ class SelfPlayEnv:
 
         with torch.no_grad():
             events = build_event_features(self.board, self.tracker, self.record)
-            self.mood = gru(torch.from_numpy(events)[None].to(self.device), self.mood)
+            events_tensor = torch.from_numpy(events)[None].to(self.device)
+            self.mood = gru(events_tensor, self.mood)
+            if self.gru_ref is not None:
+                self.mood_ref = self.gru_ref(events_tensor, self.mood_ref)
+        if self.bptt:
+            self.past_events.append(events)
+            self.past_moods.append(self.mood[0].cpu().numpy())
         tokens = self.tokenizer.tokenize(self.board, self.tracker)
         effect = piece_effect_matrix(self.board, tokens.squares()).astype(np.int64)
         if self.relation is not None:
@@ -116,8 +139,24 @@ class SelfPlayEnv:
             "mood": self.mood[0].cpu().numpy(),
             "relation": self.relation[0].cpu().numpy() if self.relation is not None else None,
         }
+        if self.mood_ref is not None:
+            obs["mood_ref"] = self.mood_ref[0].cpu().numpy()
+        if self.bptt:
+            obs.update(self.bptt_window())
         self._tokens = tokens
         return obs
+
+    def bptt_window(self) -> dict:
+        """直近 K 手の (開始状態, イベント列, 有効長)。K 手に満たない序盤は前詰めゼロ埋め。"""
+        total = len(self.past_events)
+        length = min(self.bptt, total)
+        events = np.zeros((self.bptt, MAX_PIECES, NUM_EVENT_FEATURES), dtype=np.float32)
+        events[self.bptt - length :] = np.stack(self.past_events[total - length :])
+        return {
+            "mood_start": self.past_moods[total - length],
+            "events_window": events,
+            "window_len": length,
+        }
 
     def step(self, action: int, log_prob: float, value: float, obs: dict) -> None:
         promote = action % NUM_PROMOTE
@@ -186,8 +225,19 @@ def negamax_gae(values: np.ndarray, turns: np.ndarray, winner: int | None) -> np
     return advantages
 
 
-def batch_forward(model: KokoroPolicy, observations: list[dict], device: torch.device):
-    """観測のリストをまとめて forward。"""
+def batch_forward(
+    model: KokoroPolicy,
+    observations: list[dict],
+    device: torch.device,
+    *,
+    mood: Tensor | None = None,
+    mood_key: str = "mood",
+):
+    """観測のリストをまとめて forward。
+
+    `mood` を渡すと観測に保存された感情の代わりに使う (GRU 解凍時の勾配付き再計算)。
+    `mood_key` は凍結 GRU 側の感情列 (`"mood_ref"`) で指させるとき用。
+    """
     stack = lambda key, dtype: torch.from_numpy(
         np.stack([o[key] for o in observations])
     ).to(device=device, dtype=dtype)
@@ -200,11 +250,27 @@ def batch_forward(model: KokoroPolicy, observations: list[dict], device: torch.d
         turn=torch.tensor([o["turn"] for o in observations], device=device),
         effect=stack("effect", torch.long),
         legal=stack("legal", torch.bool),
-        mood=stack("mood", torch.float32),
+        mood=mood if mood is not None else stack(mood_key, torch.float32),
     )
     if observations[0]["relation"] is not None:
         kwargs["relation"] = stack("relation", torch.float32)
     return model(**kwargs)
+
+
+def recompute_mood(gru: MoodGRU, batch: list[dict], device: torch.device) -> Tensor:
+    """truncated BPTT: K 手前の状態からイベント列を再生し、感情 `(B, N, d)` を勾配付きで返す。
+
+    序盤で有効長が K 未満のステップは、前詰めのゼロ埋め部分で状態を据え置く。
+    """
+    state = torch.from_numpy(np.stack([s["mood_start"] for s in batch])).to(device)
+    events = torch.from_numpy(np.stack([s["events_window"] for s in batch])).to(device)
+    lengths = torch.tensor([s["window_len"] for s in batch], device=device)
+    window = events.shape[1]
+    for k in range(window):
+        updated = gru(events[:, k], state)
+        valid = (k >= window - lengths)[:, None, None]
+        state = torch.where(valid, updated, state)
+    return state
 
 
 @torch.no_grad()
@@ -219,6 +285,8 @@ def collect_games(
     generator: torch.Generator,
     opponents: list[KokoroPolicy] | None = None,
     opponent_prob: float = 0.5,
+    gru_ref: MoodGRU | None = None,
+    bptt: int = 0,
 ) -> tuple[list[dict], dict]:
     """並列自己対戦で軌跡を収集し、(学習側のステップ, 統計) を返す。
 
@@ -226,9 +294,13 @@ def collect_games(
     片側を過去の自分が受け持つ (自己対戦相手への過適合対策、AlphaStarリーグの
     最小版)。相手側の手は方策が違うため**学習データには含めない** (on-policy)。
     GAEは局全体で計算する (相手手番の価値は凍結された旧valueヘッドの近似)。
+
+    `gru_ref` (凍結 GRU) を渡すと相手側はその感情列で指す (GRU 解凍時に相手が
+    分布外の感情を見せられないため)。`bptt` > 0 で再計算用の窓を各ステップに残す。
     """
     model.eval()
-    envs = [SelfPlayEnv(model, gru, device) for _ in range(games)]
+    envs = [SelfPlayEnv(model, gru, device, gru_ref=gru_ref, bptt=bptt) for _ in range(games)]
+    opponent_mood_key = "mood_ref" if gru_ref is not None else "mood"
     matchup: list[tuple[KokoroPolicy | None, int]] = []  # (相手モデル, 学習側の手番)
     for _ in envs:
         use_opponent = (
@@ -259,7 +331,10 @@ def collect_games(
             groups.setdefault(id(acting), (acting, []))[1].append((index, env, obs))
 
         for acting, members in groups.values():
-            output = batch_forward(acting, [obs for _, _, obs in members], device)
+            output = batch_forward(
+                acting, [obs for _, _, obs in members], device,
+                mood_key="mood" if acting is model else opponent_mood_key,
+            )
             log_probs = output.log_probs(tau=1.0)
             probs = torch.softmax(output.logits / tau, dim=-1)
             actions = torch.multinomial(probs.cpu(), 1, generator=generator).squeeze(-1)
@@ -312,10 +387,22 @@ def ppo_update(
     epochs: int,
     minibatch: int,
     generator: torch.Generator,
+    gru: MoodGRU | None = None,
+    gru_ref: MoodGRU | None = None,
+    anchor: float = 0.0,
 ) -> dict:
-    """収集した軌跡でPPO更新。"""
+    """収集した軌跡でPPO更新。
+
+    `gru` を渡すと GRU も更新する (E4)。感情は保存値ではなく truncated BPTT で
+    再計算し (`recompute_mood`)、`anchor` > 0 なら凍結 GRU `gru_ref` の感情との
+    MSE を足して蒸留した感情空間 (MoodProjection の意味) から離れすぎないようにする。
+    """
     model.train()
+    if gru is not None:
+        gru.train()
     stats = {"policy": 0.0, "value": 0.0, "entropy": 0.0, "clip_frac": 0.0, "batches": 0}
+    if gru is not None:
+        stats["anchor"] = 0.0
 
     # advantage の正規化 (バッチ全体)
     adv = np.array([s["advantage"] for s in steps], dtype=np.float32)
@@ -329,7 +416,8 @@ def ppo_update(
         for start in range(0, len(steps), minibatch):
             rows = indices[permutation[start : start + minibatch]]
             batch = [steps[i] for i in rows]
-            output = batch_forward(model, batch, device)
+            mood = recompute_mood(gru, batch, device) if gru is not None else None
+            output = batch_forward(model, batch, device, mood=mood)
 
             actions = torch.tensor([s["action"] for s in batch], device=device)
             old_log_probs = torch.tensor([s["log_prob"] for s in batch], device=device)
@@ -365,9 +453,17 @@ def ppo_update(
                 + config.loss.lambda_g * g_penalty
                 - config.loss.c3 * entropy
             )
+            if gru is not None and anchor > 0 and gru_ref is not None:
+                with torch.no_grad():
+                    mood_ref = recompute_mood(gru_ref, batch, device)
+                anchor_loss = nn.functional.mse_loss(mood, mood_ref)
+                loss = loss + anchor * anchor_loss
+                stats["anchor"] += float(anchor_loss.detach())
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if gru is not None:
+                nn.utils.clip_grad_norm_(gru.parameters(), max_norm=1.0)
             optimizer.step()
 
             stats["policy"] += float(policy_loss.detach())
@@ -378,8 +474,11 @@ def ppo_update(
             )
             stats["batches"] += 1
 
-    for key in ("policy", "value", "entropy", "clip_frac"):
-        stats[key] /= max(stats["batches"], 1)
+    for key in ("policy", "value", "entropy", "clip_frac", "anchor"):
+        if key in stats:
+            stats[key] /= max(stats["batches"], 1)
+    if gru is not None:
+        gru.eval()
     return stats
 
 
@@ -394,8 +493,12 @@ def play_match(
     tau: float = 0.1,
     max_plies: int = 200,
     seed: int = 0,
+    gru_incumbent: MoodGRU | None = None,
 ) -> float:
-    """challenger 対 incumbent の勝率 (先後を交互に持つ。引き分けは0.5)。"""
+    """challenger 対 incumbent の勝率 (先後を交互に持つ。引き分けは0.5)。
+
+    `gru_incumbent` を渡すと incumbent はその GRU の感情列で指す (GRU 解凍時の公平な評価)。
+    """
     generator = torch.Generator().manual_seed(seed)
     challenger.eval()
     incumbent.eval()
@@ -403,13 +506,15 @@ def play_match(
 
     for game in range(games):
         challenger_side = game % 2  # 偶数局は先手
-        env = SelfPlayEnv(challenger, gru, device)
+        env = SelfPlayEnv(challenger, gru, device, gru_ref=gru_incumbent)
         for _ in range(max_plies):
             obs = env.observe(gru)
             if obs is None:
                 break
-            model = challenger if int(env.board.turn) == challenger_side else incumbent
-            output = batch_forward(model, [obs], device)
+            is_challenger = int(env.board.turn) == challenger_side
+            model = challenger if is_challenger else incumbent
+            mood_key = "mood" if is_challenger or gru_incumbent is None else "mood_ref"
+            output = batch_forward(model, [obs], device, mood_key=mood_key)
             probs = torch.softmax(output.logits / tau, dim=-1)
             action = int(torch.multinomial(probs.cpu(), 1, generator=generator))
             env.step(action, 0.0, 0.0, obs)
@@ -444,6 +549,17 @@ def main() -> None:
     parser.add_argument(
         "--opponent-prob", type=float, default=0.5, help="片側を過去の自分が受け持つ確率"
     )
+    parser.add_argument(
+        "--culture-pool", type=Path, nargs="*", default=(),
+        help="文化リーグの league.pt。各文化 (共有trunk + θ_sp) を凍結して相手プールに常駐させる",
+    )
+    parser.add_argument(
+        "--train-gru", action="store_true",
+        help="感情 GRU も更新する (E4)。truncated BPTT + 凍結 GRU への anchor 損失",
+    )
+    parser.add_argument("--bptt", type=int, default=8, help="GRU 再計算の窓 (手数)")
+    parser.add_argument("--anchor", type=float, default=1.0, help="凍結 GRU の感情との MSE の重み")
+    parser.add_argument("--gru-lr", type=float, default=None, help="GRU の学習率 (既定: --lr)")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -464,16 +580,42 @@ def main() -> None:
     model.load_state_dict(state["model"])
     gru = MoodGRU(config.model).to(device)
     gru.load_state_dict(state["mood_gru"])
-    gru.eval()  # GRUは凍結 (docstring参照)
+    gru.eval()  # 既定では GRU は凍結 (docstring参照)。--train-gru のときも収集中は eval
+    gru_ref: MoodGRU | None = None
+    if args.train_gru:
+        gru_ref = copy.deepcopy(gru)  # 凍結 GRU: 相手側の感情列 + anchor の参照
+        for parameter in gru_ref.parameters():
+            parameter.requires_grad_(False)
+        gru_initial = [p.detach().clone() for p in gru.parameters()]
 
     snapshot = copy.deepcopy(model)  # Gate: 開始時スナップショットとの対戦勝率
     for parameter in snapshot.parameters():
         parameter.requires_grad_(False)
     snapshot.eval()
     pool: list[KokoroPolicy] = [snapshot]  # 相手プール (先頭は常に開始時)
+    for league_path in args.culture_pool:
+        # 文化リーグの成果を相手の多様性として使う (E5)。trunk はリーグ側のものを使う
+        league_state = torch.load(league_path, map_location=device, weights_only=True)
+        for culture in league_state["cultures"].values():
+            member = KokoroPolicy(config.model, flags, tau=config.loss.tau, head="desire")
+            member.to(device)
+            member.load_state_dict(league_state["model"])
+            member.personality.theta_species.weight.data.copy_(culture["theta_sp"].to(device))
+            for parameter in member.parameters():
+                parameter.requires_grad_(False)
+            member.eval()
+            pool.append(member)
+        print(f"culture pool: {league_path} から {len(league_state['cultures'])} 文化")
+    fixed = len(pool)  # 開始時 + 文化は落とさない。自分のスナップショットだけ入れ替える
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    param_groups = [{"params": model.parameters()}]
+    if args.train_gru:
+        param_groups.append({"params": gru.parameters(), "lr": args.gru_lr or args.lr})
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, weight_decay=1e-2)
     print(f"warm start: {args.checkpoint.name} / device: {device} / features: {flags}")
+    if args.train_gru:
+        gru_lr = args.gru_lr or args.lr
+        print(f"train-gru: bptt {args.bptt} / anchor {args.anchor} / gru-lr {gru_lr}")
 
     history = []
     for iteration in range(1, args.iterations + 1):
@@ -483,6 +625,7 @@ def main() -> None:
             tau=args.tau, max_plies=args.max_plies, generator=generator,
             opponents=pool if args.snapshot_every else None,
             opponent_prob=args.opponent_prob,
+            gru_ref=gru_ref, bptt=args.bptt if args.train_gru else 0,
         )
         if not steps:
             print(f"iter {iteration}: 軌跡が空 (全局即終了?)")
@@ -490,13 +633,25 @@ def main() -> None:
         update_stats = ppo_update(
             model, optimizer, steps, config, device,
             epochs=args.ppo_epochs, minibatch=args.minibatch, generator=generator,
+            gru=gru if args.train_gru else None, gru_ref=gru_ref, anchor=args.anchor,
         )
         elapsed = time.perf_counter() - started
 
         entry = {"iteration": iteration, **collect_stats, **update_stats, "seconds": elapsed}
+        if args.train_gru:
+            # GRU の漂流量: 初期パラメータからの L2 距離 (anchor と合わせて崩壊の兆候を見る)
+            entry["gru_delta"] = float(
+                torch.sqrt(
+                    sum(
+                        ((p.detach() - p0) ** 2).sum()
+                        for p, p0 in zip(gru.parameters(), gru_initial, strict=True)
+                    )
+                )
+            )
         if iteration % args.eval_every == 0 or iteration == args.iterations:
             entry["win_rate_vs_start"] = play_match(
-                model, snapshot, gru, args.eval_games, device, seed=config.seed + iteration
+                model, snapshot, gru, args.eval_games, device, seed=config.seed + iteration,
+                gru_incumbent=gru_ref,
             )
         if args.snapshot_every and iteration % args.snapshot_every == 0:
             frozen = copy.deepcopy(model)
@@ -504,8 +659,8 @@ def main() -> None:
                 parameter.requires_grad_(False)
             frozen.eval()
             pool.append(frozen)
-            if len(pool) > args.pool_size:
-                pool.pop(1)  # 開始時 (pool[0]) は残し、次に古いものを落とす
+            if len(pool) - fixed + 1 > args.pool_size:
+                pool.pop(fixed)  # 開始時・文化は残し、自分のスナップショットの最古を落とす
 
         history.append(entry)
         win = entry.get("win_rate_vs_start")
@@ -514,6 +669,10 @@ def main() -> None:
             f" 平均{collect_stats['mean_length']:.0f}手 policy {update_stats['policy']:+.4f}"
             f" value {update_stats['value']:.4f} H {update_stats['entropy']:.2f}"
             f" clip {update_stats['clip_frac']:.2f}"
+            + (
+                f" anchor {update_stats['anchor']:.4f} Δgru {entry['gru_delta']:.3f}"
+                if args.train_gru else ""
+            )
             + (f" | 対開始時勝率 {win:.2f}" if win is not None else "")
             + f" ({elapsed:.0f}秒)"
         )
@@ -537,4 +696,6 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["SelfPlayEnv", "collect_games", "negamax_gae", "play_match", "ppo_update"]
+__all__ = [
+    "SelfPlayEnv", "collect_games", "negamax_gae", "play_match", "ppo_update", "recompute_mood",
+]

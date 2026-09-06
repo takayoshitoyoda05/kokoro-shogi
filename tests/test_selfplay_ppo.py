@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-pytest.importorskip("torch", reason="torch は dependency-groups の train 側")
+torch = pytest.importorskip("torch", reason="torch は dependency-groups の train 側")
 
 from kokoro_shogi.train.selfplay_ppo import GAMMA, LAMBDA, negamax_gae  # noqa: E402
 
@@ -66,3 +66,45 @@ def test_lambda_zero_reduces_to_td_residual() -> None:
     assert adv[2] == pytest.approx(a2)
     assert adv[1] == pytest.approx(a1)
     assert adv[0] == pytest.approx(a0)
+
+
+def _rollout_with_window(bptt: int, plies: int):
+    from kokoro_shogi.config import load_config
+    from kokoro_shogi.model.mood import MoodGRU
+    from kokoro_shogi.model.policy import KokoroPolicy
+    from kokoro_shogi.train.selfplay_ppo import SelfPlayEnv
+
+    config = load_config()
+    torch.manual_seed(0)
+    gru = MoodGRU(config.model)
+    model = KokoroPolicy(config.model, config.features, head="desire")
+    env = SelfPlayEnv(model, gru, torch.device("cpu"), bptt=bptt)
+    observations = []
+    for _ in range(plies):
+        obs = env.observe(gru)
+        assert obs is not None
+        observations.append(obs)
+        move = next(iter(env.board.legal_moves))
+        env.moves.append(move)
+        env.record = env.tracker.apply_move(env.board, move)
+        env.board.push(move)
+    return gru, observations
+
+
+def test_recompute_mood_matches_rollout_including_short_windows() -> None:
+    from kokoro_shogi.train.selfplay_ppo import recompute_mood
+
+    gru, observations = _rollout_with_window(bptt=4, plies=7)
+    assert [o["window_len"] for o in observations] == [1, 2, 3, 4, 4, 4, 4]
+    mood = recompute_mood(gru, observations, torch.device("cpu"))
+    stored = torch.from_numpy(np.stack([o["mood"] for o in observations]))
+    assert torch.allclose(mood, stored, atol=1e-5)
+
+
+def test_recompute_mood_propagates_gradient_to_gru() -> None:
+    from kokoro_shogi.train.selfplay_ppo import recompute_mood
+
+    gru, observations = _rollout_with_window(bptt=3, plies=5)
+    mood = recompute_mood(gru, observations, torch.device("cpu"))
+    mood.square().sum().backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in gru.parameters())
