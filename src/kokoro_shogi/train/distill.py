@@ -109,6 +109,47 @@ def build_model(
     raise ValueError(f"model は kokoro / cnn のどちらかです: {kind}")
 
 
+def compute_loss_tensors(
+    output: PolicyOutput, batch: dict[str, Tensor], config: Config
+) -> tuple[Tensor, dict[str, Tensor], int]:
+    """`compute_loss` のテンソル版。GPU同期 (`float()` 変換) を呼び出し側に委ねる。
+
+    1手ずつ回す学習ループ (mood_distill.run_epoch) が毎手 `float()` で
+    GPUを待つと、それだけで実測1コア分のCPUを食い潰す。テンソルのまま
+    加算集計し、バッチ末尾で一度だけ同期するために分離した。
+    値の定義は `compute_loss` と同一。
+    """
+    action = batch["action"]
+    policy_loss = nn.functional.cross_entropy(output.logits, action)
+    value_loss = nn.functional.mse_loss(output.value, batch["result"])
+    loss = policy_loss + config.loss.c1 * value_loss
+
+    desire_loss = torch.zeros((), device=action.device)
+    free_term_penalty = torch.zeros((), device=action.device)
+    explained_ratio = torch.zeros((), device=action.device)
+
+    if output.desire is not None:
+        desire_loss = desire_bce(output, batch)
+        free_term_penalty = free_term_l2(output, batch["legal"])
+        loss = loss + config.loss.c2 * desire_loss + config.loss.lambda_g * free_term_penalty
+        with torch.no_grad():
+            explained_ratio = _explanation_ratio_tensor(output, batch["legal"])
+
+    with torch.no_grad():
+        accuracy = (output.logits.argmax(dim=-1) == action).float().mean()
+
+    parts = {
+        "loss": loss.detach(),
+        "policy_loss": policy_loss.detach(),
+        "value_loss": value_loss.detach(),
+        "desire_loss": desire_loss.detach(),
+        "free_term_penalty": free_term_penalty.detach(),
+        "accuracy": accuracy,
+        "explained_ratio": explained_ratio,
+    }
+    return loss, parts, int(action.shape[0])
+
+
 def compute_loss(
     output: PolicyOutput, batch: dict[str, Tensor], config: Config
 ) -> tuple[Tensor, Metrics]:
@@ -119,34 +160,10 @@ def compute_loss(
     `head="plain"` なら前2項のみ。エントロピーボーナス $-c_3 H(\\pi)$ は
     自己対戦RL (Phase 7) で入る。
     """
-    action = batch["action"]
-    policy_loss = nn.functional.cross_entropy(output.logits, action)
-    value_loss = nn.functional.mse_loss(output.value, batch["result"])
-    loss = policy_loss + config.loss.c1 * value_loss
-
-    desire_loss = torch.zeros((), device=action.device)
-    free_term_penalty = torch.zeros((), device=action.device)
-    explained_ratio = 0.0
-
-    if output.desire is not None:
-        desire_loss = desire_bce(output, batch)
-        free_term_penalty = free_term_l2(output, batch["legal"])
-        loss = loss + config.loss.c2 * desire_loss + config.loss.lambda_g * free_term_penalty
-        with torch.no_grad():
-            explained_ratio = explanation_ratio(output, batch["legal"])
-
-    with torch.no_grad():
-        accuracy = (output.logits.argmax(dim=-1) == action).float().mean()
-
+    loss, parts, positions = compute_loss_tensors(output, batch, config)
     return loss, Metrics(
-        loss=float(loss.detach()),
-        policy_loss=float(policy_loss.detach()),
-        value_loss=float(value_loss.detach()),
-        desire_loss=float(desire_loss.detach()),
-        free_term_penalty=float(free_term_penalty.detach()),
-        accuracy=float(accuracy),
-        explained_ratio=explained_ratio,
-        positions=int(action.shape[0]),
+        **{name: float(parts[name]) for name in _AVERAGED},
+        positions=positions,
     )
 
 
@@ -182,10 +199,10 @@ def free_term_l2(output: PolicyOutput, legal: Tensor) -> Tensor:
     合法手だけで平均する。非合法手の $g$ を罰しても意味がないうえ、
     局面ごとの合法手数の違いが罰則の強さに化けるのを防げる。
     """
+    # マスク積和で書き、`selected.any()` のGPU同期を避ける (空なら分子0で結果は同じ0)
     selected = legal.flatten(start_dim=1).view_as(output.free_term)
-    if not bool(selected.any()):
-        return torch.zeros((), device=output.free_term.device)
-    return output.free_term[selected].square().mean()
+    count = selected.sum().clamp(min=1)
+    return (output.free_term * selected).square().sum() / count
 
 
 def explanation_ratio(output: PolicyOutput, legal: Tensor) -> float:
@@ -199,16 +216,20 @@ def explanation_ratio(output: PolicyOutput, legal: Tensor) -> float:
     $\\langle w,d\\rangle$ と逆相関すると分母 $\\mathbb{E}s^2$ のほうが小さくなる。
     比であって割合ではないので、1で頭打ちにはならない (バグではない)。
     """
+    return float(_explanation_ratio_tensor(output, legal))
+
+
+def _explanation_ratio_tensor(output: PolicyOutput, legal: Tensor) -> Tensor:
+    """`explanation_ratio` の中身。テンソルのまま返しGPU同期を呼び出し側に委ねる。"""
     explained = (output.desire * output.personality.unsqueeze(2)).sum(dim=-1)
     scores = explained + output.free_term
 
+    # マスク積和 (合法手が空なら分子0 → 0を返す。元の early return と同値)
     selected = legal.flatten(start_dim=1).view_as(explained)
-    if not bool(selected.any()):
-        return 0.0
-
-    numerator = explained[selected].square().mean()
-    denominator = scores[selected].square().mean().clamp(min=1e-12)
-    return float(numerator / denominator)
+    count = selected.sum().clamp(min=1)
+    numerator = (explained * selected).square().sum() / count
+    denominator = ((scores * selected).square().sum() / count).clamp(min=1e-12)
+    return numerator / denominator
 
 
 def move_batch(batch: dict[str, Tensor], device: torch.device) -> dict[str, Tensor]:

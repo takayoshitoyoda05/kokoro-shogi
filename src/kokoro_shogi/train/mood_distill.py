@@ -28,9 +28,10 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
@@ -40,13 +41,14 @@ from kokoro_shogi.core.tokenizer import MAX_PIECES
 from kokoro_shogi.data.dataset import find_shards
 from kokoro_shogi.data.sequence import SequenceDataset, collate_sequences
 from kokoro_shogi.model.mood import MoodGRU, MoodProjection
-from kokoro_shogi.model.policy import KokoroPolicy
+from kokoro_shogi.model.policy import KokoroPolicy, PolicyOutput
 from kokoro_shogi.model.relations import initial_relations, update_relations
 from kokoro_shogi.train.distill import (
+    _AVERAGED,
     DEFAULT_OUT_DIR,
     DEFAULT_SHARD_DIR,
     Metrics,
-    compute_loss,
+    compute_loss_tensors,
     move_batch,
     resolve_device,
 )
@@ -108,11 +110,13 @@ def run_epoch(
     tbptt: int,
     optimizer: torch.optim.Optimizer | None = None,
     rounds: int | None = None,
+    amp: bool = False,
 ) -> Metrics:
     """1エポック。optimizer が None なら評価 (勾配なし)。
 
     `rounds` は会議 [D] のラウンド数の上書き (評価時の R=0..4 比較用)。
     None ならモデル既定 (DEFAULT_ROUNDS)。
+    `amp` は bfloat16 autocast (Ampere以降のGPU向け。GradScaler不要)。
     """
     training = optimizer is not None
     policy.train(training)
@@ -121,8 +125,16 @@ def run_epoch(
 
     with torch.set_grad_enabled(training):
         for batch in loader:
+            # 有効手のマスクはCPU側で先に読む。GPU転送後に毎手 `.any()` /
+            # `.nonzero()` すると1手ごとにGPU同期が入り、それだけで
+            # メインプロセスが1コア張り付く (実測)。
+            steps_np = batch["steps"].numpy().astype(bool)
+            plies_active = steps_np.any(axis=0)
+            t_end = int(plies_active.sum())  # 詰め物は末尾のみなので有効手数=先頭の連続区間
+            all_active = steps_np.all(axis=0)
+
             batch = move_batch(batch, device)
-            games, plies = batch["steps"].shape
+            games, _plies = steps_np.shape
             mood = (
                 gru.initial_state(games, MAX_PIECES, device=device)
                 if policy.features.mood
@@ -134,25 +146,43 @@ def run_epoch(
                 else None
             )
 
-            window: list[Tensor] = []
-            for t in range(plies):
-                active = batch["steps"][:, t]
-                if not bool(active.any()):
-                    break
-                if mood is not None:
-                    mood = gru(batch["events"][:, t], mood)
-                if relation is not None:
-                    relation = update_relations(relation, batch["effect"][:, t])
+            # 集計はテンソルのまま積み、バッチ末尾で一度だけ同期する
+            sums = {name: torch.zeros((), device=device) for name in _AVERAGED}
+            positions_total = 0
 
-                rows = active.nonzero(as_tuple=True)[0]
-                step = {key: batch[key][rows, t] for key in _STEP_KEYS}
-                if mood is not None:
-                    step["mood"] = mood[rows]
-                if relation is not None:
-                    step["relation"] = relation[rows]
-                output = policy.forward_batch(step, rounds=rounds)
-                loss, metrics = compute_loss(output, step, config)
-                total.update(metrics)
+            window: list[Tensor] = []
+            for t in range(t_end):
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+                    if mood is not None:
+                        mood = gru(batch["events"][:, t], mood)
+                    if relation is not None:
+                        relation = update_relations(relation, batch["effect"][:, t])
+
+                    if all_active[t]:
+                        step = {key: batch[key][:, t] for key in _STEP_KEYS}
+                        if mood is not None:
+                            step["mood"] = mood
+                        if relation is not None:
+                            step["relation"] = relation
+                    else:
+                        rows = torch.as_tensor(
+                            np.flatnonzero(steps_np[:, t]), device=device
+                        )
+                        step = {key: batch[key][rows, t] for key in _STEP_KEYS}
+                        if mood is not None:
+                            step["mood"] = mood[rows]
+                        if relation is not None:
+                            step["relation"] = relation[rows]
+                    output = policy.forward_batch(step, rounds=rounds)
+                # 損失は fp32 で計算する (binary_cross_entropy は autocast 禁止、
+                # かつ log の数値安定性のため)。matmul 群は上の autocast 内で
+                # bf16 実行済みなので速度効果は保たれる
+                if amp:
+                    output = _float_output(output)
+                loss, parts, positions = compute_loss_tensors(output, step, config)
+                for name in _AVERAGED:
+                    sums[name] += parts[name] * positions
+                positions_total += positions
 
                 if training:
                     window.append(loss)
@@ -164,7 +194,27 @@ def run_epoch(
             if training and window:
                 _flush_window(window, policy, gru, optimizer)
 
+            if positions_total:
+                total.update(
+                    Metrics(
+                        **{
+                            name: float(sums[name]) / positions_total
+                            for name in _AVERAGED
+                        },
+                        positions=positions_total,
+                    )
+                )
+
     return total
+
+
+def _float_output(output: PolicyOutput) -> PolicyOutput:
+    """bf16 autocast の forward 出力を fp32 に揃える (損失計算用)。"""
+    converted = {}
+    for field in fields(output):
+        value = getattr(output, field.name)
+        converted[field.name] = value.float() if isinstance(value, Tensor) else value
+    return PolicyOutput(**converted)
 
 
 def _flush_window(
@@ -201,6 +251,11 @@ def main() -> None:
     parser.add_argument("--max-games", type=int, default=None, help="使う対局数の上限")
     parser.add_argument("--val-games", type=int, default=32)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="bfloat16 autocast で学習する (VRAM節約と高速化。valは常にfp32)",
+    )
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -253,8 +308,16 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         started = time.perf_counter()
         train_metrics = run_epoch(
-            policy, gru, train_loader, config, device, tbptt=args.tbptt, optimizer=optimizer
+            policy,
+            gru,
+            train_loader,
+            config,
+            device,
+            tbptt=args.tbptt,
+            optimizer=optimizer,
+            amp=args.amp,
         )
+        # val は数値の比較可能性を保つため常に fp32 (32局なので速度影響は無視できる)
         val_metrics = run_epoch(policy, gru, val_loader, config, device, tbptt=args.tbptt)
         elapsed = time.perf_counter() - started
         print(f"epoch {epoch}: train {train_metrics.format()}")
