@@ -58,8 +58,11 @@ def load_policy(checkpoint: Path, device: torch.device, *, loyalty: bool) -> tup
     """チェックポイントを features.individual=True で読み込む。
 
     personality.project は [θ_sp | θ_ind | m] の順で連結されるため、
-    学習済みの [θ_sp | m] 重みを対応する列へ移し、θ_ind の列は0で始める
-    (零初期化の流儀。個体差は「無」から功績で生まれる)。
+    学習済みの [θ_sp | m] 重みを対応する列へ移し、θ_ind の列には θ_sp の列を
+    **複製**する (W_ind := W_sp)。これで w = softplus(W_sp(θ_sp + θ_ind) + W_m m) となり、
+    θ_ind は「種の性格からの個体オフセット」として同じ空間で解釈できる。
+    零初期化だと trunk 凍結下で ∂logπ/∂θ_ind ≡ 0 となり θ_ind が永遠に動かない
+    (2026-09-04 に 230 局後も全駒ノルム 0 で発覚)。θ_ind 自体は 0 から始める。
     """
     config = load_config()
     state = torch.load(checkpoint, map_location=device, weights_only=True)
@@ -81,6 +84,7 @@ def load_policy(checkpoint: Path, device: torch.device, *, loyalty: bool) -> tup
         if key == "personality.project.weight" and value.shape[1] == d_theta + d_mood:
             widened = torch.zeros_like(own[key])
             widened[:, :d_theta] = value[:, :d_theta]  # θ_sp の列
+            widened[:, d_theta : d_theta * 2] = value[:, :d_theta]  # θ_ind の列 = W_sp (勾配を生かす)
             widened[:, d_theta * 2 :] = value[:, d_theta:]  # m の列 (θ_ind ぶん右へ)
             remapped[key] = widened
         elif key in own and own[key].shape == value.shape:
