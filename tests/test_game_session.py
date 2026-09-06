@@ -223,3 +223,12 @@ def test_full_random_game_terminates(human):
         steps += 1
     assert session.phase is Phase.IDLE
     assert session.ledger.message().pieces
+
+
+def test_move_request_from_unity_jsonutility_with_empty_drop_species():
+    """Unity の JsonUtility は null の string を "" にして送る。通常の手として受理する。"""
+    session = GameSession(RandomEngine())
+    start(session)
+    out = request(session, {"from": "77", "to": "76", "promote": False, "drop_species": ""})
+    assert [type(m) for m in out] == [StateUpdate, StateUpdate, LegalMovesMessage]
+    assert out[0].last_move.from_ == "77" and out[0].last_move.to == "76"
