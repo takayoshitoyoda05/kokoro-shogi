@@ -40,7 +40,23 @@ namespace KokoroShogi.Net
             catch (Exception exception) { error = $"{header.type} の解析に失敗しました: {exception.Message}"; return false; }
         }
 
-        public static string SerializeMoveRequest(LegalMove move) => JsonUtility.ToJson(new MoveRequest { schema = Protocol.SchemaVersion, type = "move_request", move = move });
+        // 通常の着手には、打つ手専用のdrop_speciesを含めない。
+        [Serializable] class BoardMove { public string from; public string to; public bool promote; }
+        [Serializable] class BoardMoveRequest : MessageHeader { public BoardMove move; }
+
+        public static string SerializeMoveRequest(LegalMove move)
+        {
+            if (move == null) throw new ArgumentNullException(nameof(move));
+            if (!string.IsNullOrEmpty(move.drop_species))
+                return JsonUtility.ToJson(new MoveRequest { schema = Protocol.SchemaVersion, type = "move_request", move = move });
+
+            return JsonUtility.ToJson(new BoardMoveRequest
+            {
+                schema = Protocol.SchemaVersion,
+                type = "move_request",
+                move = new BoardMove { from = move.from, to = move.to, promote = move.promote }
+            });
+        }
         public static string SerializeGameControl(string command)
         {
             if (command != "start" && command != "resign" && command != "reset") throw new ArgumentException("commandは start/resign/reset のいずれかです。", nameof(command));

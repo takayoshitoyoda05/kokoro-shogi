@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Collections;
 using Unity.VisualScripting;
 using UnityEngine.SceneManagement;
+using KokoroShogi.Net;
 
 public class GameSceneDirector : MonoBehaviour
 {
@@ -65,6 +66,8 @@ public class GameSceneDirector : MonoBehaviour
     int nowPlayer;
     int turnCount;
     bool isCpu;
+
+    LegalMove pendingPlayerMove;
 
     //モード
     enum Mode
@@ -288,6 +291,15 @@ public class GameSceneDirector : MonoBehaviour
 
         //現在地
         Vector2Int oldpos = unit.Pos;
+        bool isDrop = unit.FieldStatus == FieldStatus.Captured;
+        UnitType originalType = unit.UnitType;
+        pendingPlayerMove = isCpu ? null : new LegalMove
+        {
+            from = isDrop ? "00" : ToShogiSquare(oldpos),
+            to = ToShogiSquare(tileindex),
+            promote = false,
+            drop_species = isDrop ? GetDropSpecies(originalType) : null
+        };
 
         //移動先に誰かがいたらとる
         captureUnit(nowPlayer, tileindex);
@@ -306,7 +318,7 @@ public class GameSceneDirector : MonoBehaviour
 
             //TODO 仮実装。成ったときの挙動を決める必要あり。
             //成
-            if (unit.isEvolution() && enemyLines[nowPlayer].Contains(tileindex.y) || enemyLines[nowPlayer].Contains(oldpos.y))
+            if (unit.isEvolution() && (enemyLines[nowPlayer].Contains(tileindex.y) || enemyLines[nowPlayer].Contains(oldpos.y)))
             {
                 //次のターン移動可能かどうか
                 UnitController[,] copyunits = new UnitController[boardWidth, boardHeight];
@@ -345,7 +357,48 @@ public class GameSceneDirector : MonoBehaviour
         //持ち駒表示を更新
         alignCaptureUnits(nowPlayer);
 
+        if (ret != Mode.WaitEvolution)
+        {
+            SendPendingPlayerMove(!isDrop && unit.UnitType != originalType);
+        }
+
         return ret;
+    }
+
+    // 配列は左下が(0, 0)。将棋の筋段は右上が11、左下が99。
+    public static string ToShogiSquare(Vector2Int position)
+    {
+        if (position.x < 0 || position.x >= 9 || position.y < 0 || position.y >= 9)
+            throw new ArgumentOutOfRangeException(nameof(position));
+        return $"{9 - position.x}{9 - position.y}";
+    }
+
+    static string GetDropSpecies(UnitType type)
+    {
+        switch (type)
+        {
+            case UnitType.Hu: return "FU";
+            case UnitType.Kaku: return "KA";
+            case UnitType.Hisya: return "HI";
+            case UnitType.Kyousha: return "KY";
+            case UnitType.Keima: return "KE";
+            case UnitType.Gin: return "GI";
+            case UnitType.Kin: return "KI";
+            default: throw new ArgumentOutOfRangeException(nameof(type), type, "打てない駒です。");
+        }
+    }
+
+    void SendPendingPlayerMove(bool promote)
+    {
+        if (pendingPlayerMove == null) return;
+        LegalMove move = pendingPlayerMove;
+        pendingPlayerMove = null;
+        move.promote = promote;
+
+        if (UnityWebSocketClient.Instance)
+            UnityWebSocketClient.Instance.SendMoveRequest(move);
+        else
+            Debug.LogError("GameSceneDirector: UnityWebSocketClientが見つからないため、着手を送信できません。", this);
     }
 
     //移動可能範囲の取得
@@ -614,14 +667,18 @@ public class GameSceneDirector : MonoBehaviour
     //成るボタン
     public void OnClickEvolutionApply()
     {
+        if (pendingPlayerMove == null) return;
+        SendPendingPlayerMove(true);
         nextMode = Mode.TurnChange;
     }
 
     //成らないボタン
     public void OnClickEvolutionCancel()
     {
+        if (pendingPlayerMove == null) return;
         selectUnit.Evolution(false);
-        OnClickEvolutionApply();
+        SendPendingPlayerMove(false);
+        nextMode = Mode.TurnChange;
     }
 
     //指定されたプレイヤー番号の全ユニットを取得する
