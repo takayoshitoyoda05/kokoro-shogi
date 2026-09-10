@@ -206,6 +206,26 @@ def main() -> None:
 
     results = list(fixed)
 
+    # ラウンドごとに argmax がどれだけ揺れるか。停止則が効かない理由の診断になる
+    # (「一度収束しても次のラウンドで答えが変わる」なら早期打ち切りは成立しない)。
+    changed_rate = [float(data["changed"][:, r].mean()) for r in range(1, args.max_rounds + 1)]
+    print("\nargmax が前ラウンドから変わった割合:")
+    for r, rate in enumerate(changed_rate, start=1):
+        print(f"  R={r - 1}→{r}  {rate * 100:.1f}%")
+
+    # 上限: 局面ごとに最良のラウンドを選べたとしたら何%か (完璧な停止則の天井)。
+    oracle = float(correct.max(axis=1).mean())
+    oracle_rounds = float(correct.argmax(axis=1).mean())
+    capped = correct[:, : min(3, args.max_rounds + 1)]
+    print(f"\nオラクル (局面ごとに最良Rを選べた場合): 一致率 {oracle * 100:.2f}%  "
+          f"平均 {oracle_rounds:.2f} ラウンド")
+    print(f"オラクル (R<=2 に限定):                一致率 {capped.max(axis=1).mean() * 100:.2f}%")
+    results.append({"rule": "oracle", "threshold": None, "rounds": None,
+                    "accuracy": oracle, "mean_rounds": oracle_rounds})
+    results.append({"rule": "oracle_r2", "threshold": None, "rounds": None,
+                    "accuracy": float(capped.max(axis=1).mean()),
+                    "mean_rounds": float(capped.argmax(axis=1).mean())})
+
     # 「argmax が前ラウンドから変わらなくなったら止める」— 閾値なしの自然な停止則
     accuracy, mean_rounds = simulate(correct, ~data["changed"], min_rounds=1)
     results.append({"rule": "stable", "threshold": None, "rounds": None,
@@ -229,7 +249,10 @@ def main() -> None:
 
     out = args.out or args.checkpoint.with_name("adaptive_council_eval.json")
     out.write_text(
-        json.dumps({"positions": positions, "results": results}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {"positions": positions, "changed_rate": changed_rate, "results": results},
+            ensure_ascii=False, indent=2,
+        ),
         encoding="utf-8",
     )
     print(f"\n{out.name} に保存しました。")
