@@ -130,21 +130,28 @@ def crossover_theta(
     theta_q: torch.Tensor,
     mode: str,
     rng: np.random.Generator,
+    *,
+    alpha: float = 0.0,
 ) -> torch.Tensor:
     """ES 交叉 (DESIGN.md §4d): $\\Phi_c = \\beta\\Phi_p + (1-\\beta)\\Phi_q$。
 
-    - ``blend``: $\\beta \\sim U(0,1)$ を Φ 全体で 1 つ引く (設計書の式そのまま)。
+    - ``blend``: $\\beta$ を Φ 全体で 1 つ引く (設計書の式そのまま)。
     - ``uniform``: 駒種の行ごとに独立に $\\beta$ を引く。歩は親 p 由来・飛車は親 q 由来、
-      といった形質単位の組み替えが起き、単親コピー+ガウス変異では届かない点に子が置ける。
+      といった形質単位の組み替えが起きる。
 
-    2026-09-11: E2/E2b で観測した均質化は、置換が「最良文化のまわりのガウス球」からしか
-    子を作らない単親構造に由来するという仮説の検証用に追加した。
+    `alpha` は BLX-α: $\\beta \\sim U(-\\alpha, 1+\\alpha)$。既定の 0 は「子は必ず両親の
+    内側」で、二親が独立なら子の分散は $E[\\beta^2]+E[(1-\\beta)^2] = 2/3$ 倍に縮む。
+    2026-09-11 の E6 (α=0) では文化間距離が gen 5 で 1.65 に頭打ちになり、同条件の
+    単親コピー E2b が 2.50 まで伸び続けたのと対照的だった (仮説の反証)。倍率は
+    $2((1+2\\alpha)^2/12 + 1/4)$ なので、α≈0.366 で中立、慣用値 α=0.5 で 1.167 倍に
+    広がる。α を選ぶだけで縮む/保つ/広げるを連続的に指定できる。
     """
+    low, high = -alpha, 1.0 + alpha
     if mode == "blend":
-        beta = torch.full((1, 1), float(rng.uniform()))
+        beta = torch.full((1, 1), float(rng.uniform(low, high)))
     elif mode == "uniform":
         beta = torch.from_numpy(
-            rng.uniform(size=(theta_p.shape[0], 1)).astype(np.float32)
+            rng.uniform(low, high, size=(theta_p.shape[0], 1)).astype(np.float32)
         )
     else:
         raise ValueError(f"unknown crossover: {mode}")
@@ -161,6 +168,7 @@ def select_and_mutate(
     selection: str = "fitness",
     fix_hypers: bool = False,
     crossover: str = "none",
+    crossover_alpha: float = 0.0,
 ) -> tuple[list[str], str]:
     """下位 `replaced` 文化を、上位文化の複製+変異 (または交叉+変異) で置き換える (PBT)。
 
@@ -178,6 +186,7 @@ def select_and_mutate(
     `fix_hypers`: True なら (τ, λ_g) を摂動せず親の値をそのまま継ぐ。
     `crossover`: "none" で単親コピー (従来)、"blend"/"uniform" で二親の ES 交叉。
     親は淘汰対象を除いた適応度上位 2 文化。親が 1 つしか取れないときは単親に落ちる。
+    `crossover_alpha`: BLX-α の α (交叉が集団の分散を縮めるのを打ち消す)。
 
     戻り値は (置き換えた文化名, 親の表示名)。交叉時は "cultureP+cultureQ" 形式。
     """
@@ -215,7 +224,9 @@ def select_and_mutate(
         if mate is None:
             child = best.theta_sp.clone()
         else:
-            child = crossover_theta(best.theta_sp, mate.theta_sp, crossover, rng)
+            child = crossover_theta(
+                best.theta_sp, mate.theta_sp, crossover, rng, alpha=crossover_alpha
+            )
         sigma = sigma_relative * float(child.std().clamp(min=1e-6))
         noise = torch.from_numpy(
             rng.normal(0.0, sigma, size=tuple(child.shape)).astype(np.float32)
@@ -271,6 +282,11 @@ def main() -> None:
     parser.add_argument(
         "--crossover", choices=("none", "blend", "uniform"), default="none",
         help="置換時の ES 交叉 (DESIGN.md §4d)。uniform は駒種ごとに独立に β を引く",
+    )
+    parser.add_argument(
+        "--crossover-alpha", type=float, default=0.0,
+        help="BLX-α の α。β~U(-α,1+α) になる。0 だと子は必ず両親の内側で分散が 2/3 倍に"
+             "縮む。α≈0.366 で中立、0.5 で 1.167 倍に広がる",
     )
     parser.add_argument(
         "--fitness", choices=("last", "ema"), default="last",
@@ -372,7 +388,7 @@ def main() -> None:
         renewed, parent = select_and_mutate(
             cultures, rng, replaced=args.replaced, sigma_relative=args.mutation_sigma,
             grace=args.grace, selection=args.selection, fix_hypers=args.fix_hypers,
-            crossover=args.crossover,
+            crossover=args.crossover, crossover_alpha=args.crossover_alpha,
         )
         for culture in cultures:
             if culture.name not in renewed:
@@ -389,6 +405,7 @@ def main() -> None:
             "ages": ages,
             "selection": args.selection,
             "crossover": args.crossover,
+            "crossover_alpha": args.crossover_alpha,
             "fitness_mode": args.fitness,
             "fitness": {
                 c.name: (None if c.fitness is None else round(c.fitness, 3)) for c in cultures

@@ -11,7 +11,11 @@ import pytest
 
 torch = pytest.importorskip("torch", reason="torch は dependency-groups の train 側")
 
-from kokoro_shogi.train.league import Culture, select_and_mutate  # noqa: E402
+from kokoro_shogi.train.league import (  # noqa: E402
+    Culture,
+    crossover_theta,
+    select_and_mutate,
+)
 
 
 def make_cultures(win_rates: list[float], ages: list[int] | None = None) -> list[Culture]:
@@ -195,3 +199,51 @@ def test_drift_mutates_everyone_and_replaces_nobody() -> None:
         assert not torch.equal(culture.theta_sp, original)  # 全員が動く
         assert culture.age == 5  # 誰も生まれ直していない
     assert [c.win_rate for c in cultures] == [0.7, 0.5, 0.3]  # 勝率は触らない
+
+
+# --- BLX-α (2026-09-11: 交叉が分散を縮める問題への対処) ---------------------
+
+
+def variance_ratio(alpha: float, seed: int = 0) -> float:
+    """独立な二親を交叉したとき、子の分散が親の分散の何倍になるかを実測する。"""
+    rng = np.random.default_rng(seed)
+    generator = torch.Generator().manual_seed(seed)
+    parents = torch.randn(2, 4096, 1, generator=generator)
+    children = torch.stack([
+        crossover_theta(parents[0], parents[1], "uniform", rng, alpha=alpha)
+        for _ in range(64)
+    ])
+    return float(children.var()) / float(parents.var())
+
+
+def test_plain_crossover_shrinks_variance_to_two_thirds() -> None:
+    # E[β²]+E[(1-β)²] = 1/3 + 1/3。子は必ず両親の内側にしか置けない
+    assert variance_ratio(0.0) == pytest.approx(2 / 3, rel=0.05)
+
+
+def test_blx_alpha_expands_variance_as_the_formula_says() -> None:
+    # 倍率 = 2((1+2α)²/12 + 1/4)
+    for alpha in (0.366, 0.5):
+        expected = 2 * ((1 + 2 * alpha) ** 2 / 12 + 0.25)
+        assert variance_ratio(alpha) == pytest.approx(expected, rel=0.05)
+    assert variance_ratio(0.366) == pytest.approx(1.0, rel=0.05)  # α≈0.366 で中立
+
+
+def test_blx_alpha_places_children_outside_the_parents() -> None:
+    rng = np.random.default_rng(0)
+    parents = (torch.zeros(64, 1), torch.ones(64, 1))
+    inside = crossover_theta(*parents, "uniform", rng, alpha=0.0)
+    assert inside.min() >= 0.0 and inside.max() <= 1.0
+    outside = crossover_theta(*parents, "uniform", rng, alpha=0.5)
+    assert outside.min() < 0.0 or outside.max() > 1.0  # 親の外にも子が置ける
+    assert outside.min() >= -0.5 and outside.max() <= 1.5  # ただし U(-α, 1+α) の範囲内
+
+
+def test_crossover_alpha_reaches_select_and_mutate() -> None:
+    cultures = make_flat_cultures([0.0, 1.0, 2.0], [0.7, 0.5, 0.3])
+    select_and_mutate(
+        cultures, np.random.default_rng(3), replaced=1,
+        sigma_relative=0.0, crossover="uniform", crossover_alpha=0.5,
+    )
+    child = cultures[2].theta_sp  # 親は 0.0 と 1.0 の定数なので子の値 = β
+    assert child.min() < 0.0 or child.max() > 1.0
