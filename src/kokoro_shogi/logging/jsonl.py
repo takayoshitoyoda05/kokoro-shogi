@@ -165,6 +165,12 @@ class LegalMove(_Strict):
     #: 打つ手のときだけ入る駒種
     drop_species: Species | None = None
 
+    @field_validator("drop_species", mode="before")
+    @classmethod
+    def _empty_string_is_none(cls, value: object) -> object:
+        """Unity の JsonUtility は null の string を "" で送ってくるので、無しとして扱う。"""
+        return None if value == "" else value
+
     @model_serializer(mode="wrap")
     def _omit_inapplicable_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         """その手に当てはまらないフィールドはキーごと落とす (INTERFACE.md §4 の例と同形)。
