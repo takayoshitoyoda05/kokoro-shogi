@@ -494,10 +494,14 @@ def play_match(
     max_plies: int = 200,
     seed: int = 0,
     gru_incumbent: MoodGRU | None = None,
+    counts: dict[str, int] | None = None,
 ) -> float:
     """challenger 対 incumbent の勝率 (先後を交互に持つ。引き分けは0.5)。
 
     `gru_incumbent` を渡すと incumbent はその GRU の感情列で指す (GRU 解凍時の公平な評価)。
+    `counts` を渡すと "games"/"drawn" を加算する。勝率推定のノイズは1局の分散
+    $0.25(1-d)$ に比例するので、淘汰がどれだけノイズで決まっているかを見積もるには
+    引き分け率 $d$ が要る (2026-09-11)。
     """
     generator = torch.Generator().manual_seed(seed)
     challenger.eval()
@@ -522,8 +526,12 @@ def play_match(
             env.winner = 1 - int(env.board.turn)
         if env.winner is None:
             score += 0.5
+            if counts is not None:
+                counts["drawn"] = counts.get("drawn", 0) + 1
         elif env.winner == challenger_side:
             score += 1.0
+        if counts is not None:
+            counts["games"] = counts.get("games", 0) + 1
     return score / games
 
 

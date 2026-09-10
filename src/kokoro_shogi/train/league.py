@@ -99,17 +99,18 @@ def round_robin(
     games_per_pair: int,
     max_plies: int,
     seed: int,
-) -> None:
-    """総当たりで win_rate を更新する。"""
+) -> dict[str, int]:
+    """総当たりで win_rate を更新し、対局数と引き分け数を返す。"""
     points = {culture.name: 0.0 for culture in cultures}
     matches = {culture.name: 0 for culture in cultures}
+    counts: dict[str, int] = {"games": 0, "drawn": 0}
     for i, a in enumerate(cultures):
         for j, b in enumerate(cultures[i + 1 :], start=i + 1):
             swap_in(model, a)
             swap_in(rival, b)
             score = play_match(
                 model, rival, gru, games_per_pair, device,
-                max_plies=max_plies, seed=seed + i * 100 + j,
+                max_plies=max_plies, seed=seed + i * 100 + j, counts=counts,
             )
             points[a.name] += score * games_per_pair
             points[b.name] += (1 - score) * games_per_pair
@@ -118,6 +119,7 @@ def round_robin(
     for culture in cultures:
         if matches[culture.name]:
             culture.win_rate = points[culture.name] / matches[culture.name]
+    return counts
 
 
 def fitness_of(culture: Culture) -> float:
@@ -369,7 +371,7 @@ def main() -> None:
                     )
             swap_out(model, culture)
 
-        round_robin(
+        counts = round_robin(
             model, rival, gru, cultures, device,
             games_per_pair=args.games_per_pair, max_plies=args.max_plies,
             seed=config.seed + generation * 1000,
@@ -403,6 +405,7 @@ def main() -> None:
             "renewed": renewed,
             "parent": parent,
             "ages": ages,
+            "draw_rate": round(counts["drawn"] / max(counts["games"], 1), 4),
             "selection": args.selection,
             "crossover": args.crossover,
             "crossover_alpha": args.crossover_alpha,
