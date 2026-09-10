@@ -155,7 +155,7 @@ public class GameSceneDirector : MonoBehaviour
                 pos.y = 0.7f;
 
                 GameObject prefab = prefabUnits[type - 1]; //1～8のboardSettingsの値を0～7に変換して、プレハブユニットの値に割り当てる
-                GameObject unit = Instantiate(prefab, pos, Quaternion.Euler(90, player * 180, 0));
+                GameObject unit = Instantiate(prefab, pos, Quaternion.Euler(0, player * 180, 0));
                 unit.AddComponent<Rigidbody>();
 
                 UnitController unitctrl = unit.AddComponent<UnitController>();
@@ -454,16 +454,16 @@ public class GameSceneDirector : MonoBehaviour
         }
 
         int movablecount = 0;
-        foreach(var item in getUnits(nowPlayer))
+        foreach (var item in getUnits(nowPlayer))
         {
             movablecount += getMovableTiles(item).Count;
         }
 
         //動かせないとき
-        if(1 > movablecount)
+        if (1 > movablecount)
         {
             textResultInfo.text = "移動できません";
-            if(isoute)
+            if (isoute)
             {
                 textResultInfo.text = "詰み\n" + (GetNextPlayer(nowPlayer) + 1) + "Pの勝ち";
             }
@@ -471,7 +471,7 @@ public class GameSceneDirector : MonoBehaviour
         }
 
         //次が結果表示なら
-        if(Mode.Result == nextMode)
+        if (Mode.Result == nextMode)
         {
             textTurnInfo.text = "";
             buttonRematch.gameObject.SetActive(true);
@@ -689,9 +689,9 @@ public class GameSceneDirector : MonoBehaviour
         //全ユニットのリストを作成する
         List<UnitController> allunits = new List<UnitController>(captureUnits);
         allunits.AddRange(units);
-        foreach(var item in allunits)
+        foreach (var item in allunits)
         {
-            if(!item || player != item.Player) continue;
+            if (!item || player != item.Player) continue;
             ret.Add(item);
         }
         return ret;

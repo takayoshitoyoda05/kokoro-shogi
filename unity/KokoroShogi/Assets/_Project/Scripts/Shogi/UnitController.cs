@@ -91,7 +91,7 @@ public class UnitController : MonoBehaviour
     //指定されたプレイヤー番号の角度を返す
     Vector3 getDefaultAngles(int player)
     {
-        return new Vector3(90, player * 180, 0);
+        return new Vector3(270, (0 == player) ? 180 : 0, 0);
     }
 
     //移動処理
@@ -576,8 +576,8 @@ public class UnitController : MonoBehaviour
         if (evolution && UnitType.None != evolutionTable[UnitType])
         {
             UnitType = evolutionTable[UnitType];
-            angle.x = 270;
-            angle.y = (0 == Player) ? 180 : 0;
+            angle.x = 90;
+            angle.y = Player *180;
             angle.z = 0;
             transform.eulerAngles = angle;
         }
