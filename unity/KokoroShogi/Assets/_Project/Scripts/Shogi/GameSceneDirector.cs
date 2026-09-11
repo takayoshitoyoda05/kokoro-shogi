@@ -13,6 +13,16 @@ using KokoroShogi.Net;
 
 public class GameSceneDirector : MonoBehaviour
 {
+    [SerializeField] PieceCameraAnimator pieceCameraAnimator;
+
+    void Awake()
+    {
+        if (!pieceCameraAnimator)
+            pieceCameraAnimator = GetComponent<PieceCameraAnimator>();
+        if (!pieceCameraAnimator)
+            pieceCameraAnimator = gameObject.AddComponent<PieceCameraAnimator>();
+    }
+
     //UI関連
     [SerializeField] TMP_Text textTurnInfo;
     [SerializeField] TMP_Text textResultInfo;
@@ -68,6 +78,8 @@ public class GameSceneDirector : MonoBehaviour
     bool isCpu;
 
     LegalMove pendingPlayerMove;
+    UnitController pendingMoveUnit;
+    Vector2Int pendingMoveDestination;
 
     //モード
     enum Mode
@@ -76,6 +88,7 @@ public class GameSceneDirector : MonoBehaviour
         Start,
         Select,
         WaitEvolution,
+        Animating,
         TurnChange,
         Result
     }
@@ -283,86 +296,84 @@ public class GameSceneDirector : MonoBehaviour
         }
     }
 
-    //ユニット移動
+    // 移動先と成りの選択を確定し、盤面変更は接近完了後に行う。
     Mode moveUnit(UnitController unit, Vector2Int tileindex)
     {
-        //移動し終わった後のモード
-        Mode ret = Mode.TurnChange;
-
-        //現在地
-        Vector2Int oldpos = unit.Pos;
+        pendingMoveUnit = unit;
+        pendingMoveDestination = tileindex;
         bool isDrop = unit.FieldStatus == FieldStatus.Captured;
-        UnitType originalType = unit.UnitType;
         pendingPlayerMove = isCpu ? null : new LegalMove
         {
-            from = isDrop ? "00" : ToShogiSquare(oldpos),
+            from = isDrop ? "00" : ToShogiSquare(unit.Pos),
             to = ToShogiSquare(tileindex),
             promote = false,
-            drop_species = isDrop ? GetDropSpecies(originalType) : null
+            drop_species = isDrop ? GetDropSpecies(unit.UnitType) : null
         };
-
-        //移動先に誰かがいたらとる
-        captureUnit(nowPlayer, tileindex);
-
-        //ユニット移動
-        unit.Move(tiles[tileindex], tileindex);
-
-        //内部データ更新（新しい場所
-        units[tileindex.x, tileindex.y] = unit;
-
-        //ボード上の駒を更新
-        if (FieldStatus.OnBoard == unit.FieldStatus)
+        bool canPromote = !isDrop && unit.isEvolution()
+            && (enemyLines[nowPlayer].Contains(tileindex.y) || enemyLines[nowPlayer].Contains(unit.Pos.y));
+        // 最奥の歩・香、最奥二段の桂は不成では次に動けない。
+        int ranksRemaining = nowPlayer == 0 ? boardHeight - 1 - tileindex.y : tileindex.y;
+        bool mustPromote = canPromote && (isCpu
+            || ((unit.UnitType == UnitType.Hu || unit.UnitType == UnitType.Kyousha) && ranksRemaining == 0)
+            || (unit.UnitType == UnitType.Keima && ranksRemaining <= 1));
+        if (canPromote && !mustPromote)
         {
-            //内部データ更新
-            units[oldpos.x, oldpos.y] = null;
-
-            //TODO 仮実装。成ったときの挙動を決める必要あり。
-            //成
-            if (unit.isEvolution() && (enemyLines[nowPlayer].Contains(tileindex.y) || enemyLines[nowPlayer].Contains(oldpos.y)))
-            {
-                //次のターン移動可能かどうか
-                UnitController[,] copyunits = new UnitController[boardWidth, boardHeight];
-                //自分以外いないフィールドを作る
-                copyunits[unit.Pos.x, unit.Pos.y] = unit;
-
-                //CPUもしくは次移動できないなら強制的に成る（一番奥に移動したときに移動先がなくなるのを防ぐ）
-                if (isCpu || 1 > unit.GetMovableTiles(copyunits).Count)
-                {
-                    unit.Evolution();
-                }
-                //成るか確認
-                else
-                {
-                    //成った状態を表示
-                    unit.Evolution();
-                    setSelectCursors(unit);
-
-                    //ナビゲーション
-                    textResultInfo.text = "成りますか？";
-                    buttonEvolutionApply.gameObject.SetActive(true);
-                    buttonEvolutionCancel.gameObject.SetActive(true);
-
-                    ret = Mode.WaitEvolution;
-                }
-            }
+            textResultInfo.text = "成りますか？";
+            buttonEvolutionApply.gameObject.SetActive(true);
+            buttonEvolutionCancel.gameObject.SetActive(true);
+            return Mode.WaitEvolution;
         }
-        //持ち駒の確認
-        else
+        return BeginPendingMove(mustPromote);
+    }
+
+    Mode BeginPendingMove(bool promote)
+    {
+        UnitController unit = pendingMoveUnit;
+        Vector2Int destination = pendingMoveDestination;
+        pendingMoveUnit = null; // 二重クリックで同じ着手を開始させない。
+        buttonEvolutionApply.gameObject.SetActive(false);
+        buttonEvolutionCancel.gameObject.SetActive(false);
+        textResultInfo.text = "";
+        setSelectCursors();
+        bool capture = units[destination.x, destination.y] != null;
+        if ((capture || promote) && pieceCameraAnimator && pieceCameraAnimator.isActiveAndEnabled)
         {
-            captureUnits.Remove(unit);
+            StartCoroutine(PlayPendingMove(unit, destination, promote));
+            return Mode.Animating;
         }
-        //ユニットの状態を更新
+        CommitMove(unit, destination, promote);
+        return Mode.TurnChange;
+    }
+
+    IEnumerator PlayPendingMove(UnitController unit, Vector2Int destination, bool promote)
+    {
+        Vector3 focus = tiles[destination].transform.position;
+        focus.y = UnitController.UnSelectUnitY;
+        pieceCameraAnimator.FocusAt(focus, true);
+        // 呼び出し元のモード更新を待つ。カメラ未設定時も進行を止めない。
+        yield return null;
+        while (pieceCameraAnimator && pieceCameraAnimator.IsPlaying && !pieceCameraAnimator.HasReachedFocus)
+            yield return null;
+        CommitMove(unit, destination, promote);
+        if (pieceCameraAnimator) pieceCameraAnimator.CompleteAction();
+        while (pieceCameraAnimator && pieceCameraAnimator.IsPlaying)
+            yield return null;
+        nextMode = Mode.TurnChange;
+    }
+
+    void CommitMove(UnitController unit, Vector2Int destination, bool promote)
+    {
+        Vector2Int origin = unit.Pos;
+        bool isDrop = unit.FieldStatus == FieldStatus.Captured;
+        captureUnit(nowPlayer, destination);
+        unit.Move(tiles[destination], destination);
+        if (isDrop) captureUnits.Remove(unit);
+        else units[origin.x, origin.y] = null;
+        units[destination.x, destination.y] = unit;
         unit.FieldStatus = FieldStatus.OnBoard;
-
-        //持ち駒表示を更新
+        if (promote) unit.Evolution();
         alignCaptureUnits(nowPlayer);
-
-        if (ret != Mode.WaitEvolution)
-        {
-            SendPendingPlayerMove(!isDrop && unit.UnitType != originalType);
-        }
-
-        return ret;
+        SendPendingPlayerMove(promote);
     }
 
     // 配列は左下が(0, 0)。将棋の筋段は右上が11、左下が99。
@@ -485,6 +496,7 @@ public class GameSceneDirector : MonoBehaviour
     {
         //モード選択画面の表示中は、背後の盤や駒をクリックさせない
         if (!ModeSelectionManager.IsWorldInteractionAllowed) return;
+        if (pieceCameraAnimator && pieceCameraAnimator.IsPlaying) return;
 
         GameObject tile = null;
         UnitController unit = null;
@@ -667,18 +679,15 @@ public class GameSceneDirector : MonoBehaviour
     //成るボタン
     public void OnClickEvolutionApply()
     {
-        if (pendingPlayerMove == null) return;
-        SendPendingPlayerMove(true);
-        nextMode = Mode.TurnChange;
+        if (!pendingMoveUnit || nowMode != Mode.WaitEvolution) return;
+        nextMode = BeginPendingMove(true);
     }
 
     //成らないボタン
     public void OnClickEvolutionCancel()
     {
-        if (pendingPlayerMove == null) return;
-        selectUnit.Evolution(false);
-        SendPendingPlayerMove(false);
-        nextMode = Mode.TurnChange;
+        if (!pendingMoveUnit || nowMode != Mode.WaitEvolution) return;
+        nextMode = BeginPendingMove(false);
     }
 
     //指定されたプレイヤー番号の全ユニットを取得する

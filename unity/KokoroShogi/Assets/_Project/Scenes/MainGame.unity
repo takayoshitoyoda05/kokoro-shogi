@@ -3768,6 +3768,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1695837886}
   - component: {fileID: 1695837887}
+  - component: {fileID: 1695837888}
   m_Layer: 0
   m_Name: GameSceneDirecter
   m_TagString: Untagged
@@ -3802,6 +3803,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 97b11f9d5f7075943aa75fc3dbd27258, type: 3}
   m_Name: 
   m_EditorClassIdentifier: '::'
+  pieceCameraAnimator: {fileID: 0}
   textTurnInfo: {fileID: 665698508}
   textResultInfo: {fileID: 1788833234}
   buttonTitle: {fileID: 580528249}
@@ -3820,6 +3822,27 @@ MonoBehaviour:
   - {fileID: 1632020127973413896, guid: 724dab131f5aa4e4c8e8c7d7fc5221b8, type: 3}
   prefabCursor: {fileID: 3394109681229454874, guid: c26d3cca767285447afd965bb0c57ac5, type: 3}
   prefabUnitTile: {fileID: 1361154618405264304, guid: 5f1018e400e5c2e498fe6d80f782283e, type: 3}
+--- !u!114 &1695837888
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1695837885}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 62a1c768c9124ce390e1f089c8e90ea9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PieceCameraAnimator
+  targetCamera: {fileID: 506495394}
+  closeUpOffset: {x: 0.5, y: 0, z: -5.5}
+  closeUpYaw: 40
+  closeUpPitch: 45
+  lookAtOffset: {x: 0, y: 0.15, z: 0}
+  approachDuration: 2
+  holdDuration: 0.3
+  returnDuration: 1
+  closeUpOrthographicSize: 100
 --- !u!1 &1717070906
 GameObject:
   m_ObjectHideFlags: 0
