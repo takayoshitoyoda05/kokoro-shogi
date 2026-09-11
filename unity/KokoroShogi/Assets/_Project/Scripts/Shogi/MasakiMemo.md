@@ -12,20 +12,24 @@ Unity→AI
 
 ### 2.pythonからUnityへ盤の情報を送信：state_update（駒の情報）, legal_moves(合法手を表示)
 
+//P:歩orと金, L:香or成香, N:桂or成桂 S:銀or成銀, G:金, B:角or馬, R:飛or龍, K,玉or王
+//sfenについて: 数字は直前の文字が示す駒の数を表している
+//
+
 {
     "schema": "1.0",
     "type": "state_update",
     "ply": 42,　                                        //何手目か
     "sfen": "ln2g1snb/r1k2g2l/... b - 43", 　　　　　　　//行ごとの駒の種類と数
     "last_move": {
-    "from": "32", "to": "23",
+    "from": "32", "to": "23", //ここを取得する
     "piece_id": "G49_gen0_0018",
-    "capture": false, "promote": false, "drop": false
+    "capture": false, "promote": false, "drop": false //あとここ
 },
     "eval": -0.38,
     "pieces": [
         {
-            "piece_id": "B22_gen0_0006",
+            "piece_id": "B22_gen0_0006", 　　　　　　　　　　　　　　　//piece_idの割り当てがわからん
             "species": "KA", "owner": 1, "square": "11",
             "mood": { "fear": 0.175, "aggression": 0.15, "valence": 0.34 },
             "desire": { "survive": 0.387, "attack": 0.15, "promote": 0.0,
@@ -54,6 +58,8 @@ Unity → AI
     "type": "move_request",
     "move": { "from": "77", "to": "76", "promote": false }
 }
+
+//持ち駒を打つ場合はfrom: "00"とdrop_speciesを送る
 
 ### 4.AIが思考した結果の盤情報がUnityへ送られてくる（プレイヤーの番 → AIの番の計2回送られてくる）一つのファイルに2コ?：state_update
 
