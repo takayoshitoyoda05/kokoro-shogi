@@ -232,6 +232,55 @@ def figure_league_distance(checkpoints: Path, out_dir: Path) -> None:
     )
 
 
+def figure_league_strength(checkpoints: Path, out_dir: Path) -> None:
+    """淘汰を機能させるかどうかだけが強さを動かす (リーグ実験の結論)。"""
+    merged: dict[str, dict] = {}
+    for name in ("league_vs_base.json", "league_vs_base_e6_e2b.json"):
+        path = checkpoints / name
+        if path.exists():
+            merged.update(json.loads(path.read_text())["results"])
+    runs = (
+        ("E1: 乱択淘汰", "league_E1_control"),
+        ("E6: 適応度+交叉", "league_E6_crossover"),
+        ("E2b: 適応度+猶予", "league_E2b_grace"),
+        ("E2: 適応度淘汰", "league_E2_run3"),
+    )
+    rows = [(label, merged[run]) for label, run in runs if run in merged]
+
+    figure, axes = new_axes(width=7.4, height=3.6)
+    axes.grid(axis="y", visible=False)
+    axes.axvline(50, color=AXIS, linewidth=1.5, linestyle=(0, (4, 3)), zorder=2)
+    axes.text(50.6, -0.45, "ppo2 と互角", fontsize=9, color=MUTED)
+
+    for index, (label, result) in enumerate(rows):
+        cultures = [v * 100 for n, v in result.items() if n.startswith("culture")]
+        mean = result["cultures_mean"] * 100
+        axes.plot(
+            cultures, [index] * len(cultures), "o", color=SERIES[0], markersize=7,
+            alpha=0.35, markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3,
+        )
+        axes.plot(
+            [mean], [index], "D", color=SERIES[0], markersize=11,
+            markeredgecolor=SURFACE, markeredgewidth=2, zorder=4,
+        )
+        axes.text(mean, index + 0.28, f"{mean:.1f}%", ha="center", fontsize=10,
+                  color=INK, fontweight="bold")
+        _ = label
+
+    axes.set_yticks(range(len(rows)))
+    axes.set_yticklabels([label for label, _ in rows], fontsize=10, color=INK)
+    axes.set_ylim(-0.6, len(rows) - 0.3)
+    axes.set_xlim(35, 80)
+    axes.set_xlabel("基点モデル ppo2 に対する勝率 (%)", color=INK_SECONDARY, fontsize=10)
+    finish(
+        figure, axes,
+        "強さを動かすのは淘汰の有無だけだった",
+        "最終6文化 × 各60局。薄い丸が各文化、菱形がその平均。"
+        "乱択淘汰 (E1) だけが負け越し、交叉の有無は解像できない",
+        out_dir / "league_strength.png",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoints", type=Path, default=REPO_ROOT / "checkpoints")
@@ -246,6 +295,7 @@ def main() -> None:
     figure_council_rounds(args.checkpoints, args.out_dir)
     figure_ladder(args.checkpoints, args.out_dir)
     figure_league_distance(args.checkpoints, args.out_dir)
+    figure_league_strength(args.checkpoints, args.out_dir)
 
 
 if __name__ == "__main__":
