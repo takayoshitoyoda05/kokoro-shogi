@@ -11,7 +11,11 @@ import pytest
 
 torch = pytest.importorskip("torch", reason="torch は dependency-groups の train 側")
 
-from kokoro_shogi.train.league import Culture, select_and_mutate  # noqa: E402
+from kokoro_shogi.train.league import (  # noqa: E402
+    Culture,
+    crossover_theta,
+    select_and_mutate,
+)
 
 
 def make_cultures(win_rates: list[float], ages: list[int] | None = None) -> list[Culture]:
@@ -96,3 +100,150 @@ def test_ages_increment_only_for_survivors() -> None:
         if culture.name not in renewed:
             culture.age += 1
     assert [c.age for c in cultures] == [4, 4, 0]
+
+
+# --- ES 交叉 (2026-09-11 追加) ----------------------------------------------
+
+
+def make_flat_cultures(values: list[float], win_rates: list[float]) -> list[Culture]:
+    """θ_sp が行ごとに定数の文化。交叉で「どの親から来た行か」を判定できる。"""
+    return [
+        Culture(
+            name=f"culture{k}",
+            theta_sp=torch.full((8, 4), float(value)),
+            tau=0.8,
+            lambda_g=0.01,
+            win_rate=wr,
+        )
+        for k, (value, wr) in enumerate(zip(values, win_rates, strict=True))
+    ]
+
+
+def test_crossover_none_keeps_single_parent_copy() -> None:
+    cultures = make_flat_cultures([0.0, 1.0, 2.0], [0.7, 0.5, 0.3])
+    renewed, parent = select_and_mutate(
+        cultures, np.random.default_rng(0), replaced=1, sigma_relative=0.0
+    )
+    assert renewed == ["culture2"] and parent == "culture0"
+    assert torch.equal(cultures[2].theta_sp, cultures[0].theta_sp)
+
+
+def test_uniform_crossover_mixes_two_parents_per_species() -> None:
+    cultures = make_flat_cultures([0.0, 1.0, 2.0], [0.7, 0.5, 0.3])
+    renewed, parent = select_and_mutate(
+        cultures, np.random.default_rng(0), replaced=1,
+        sigma_relative=0.0, crossover="uniform",
+    )
+    assert renewed == ["culture2"]
+    assert parent == "culture0+culture1"  # 淘汰対象を除いた上位2つ
+    child = cultures[2].theta_sp
+    # 親は 0.0 と 1.0 の定数なので、子の各成分は β そのもの
+    assert child.min() >= 0.0 and child.max() <= 1.0
+    per_species = child[:, 0]
+    assert len(torch.unique(per_species)) == 8  # 駒種ごとに独立に β を引いている
+    assert torch.allclose(child, per_species[:, None].expand_as(child))  # 行内は同じ β
+
+
+def test_blend_crossover_uses_one_beta_for_whole_phi() -> None:
+    cultures = make_flat_cultures([0.0, 1.0, 2.0], [0.7, 0.5, 0.3])
+    select_and_mutate(
+        cultures, np.random.default_rng(0), replaced=1,
+        sigma_relative=0.0, crossover="blend",
+    )
+    child = cultures[2].theta_sp
+    assert len(torch.unique(child)) == 1  # Φ 全体で β は 1 つ
+    assert 0.0 < float(child[0, 0]) < 1.0
+
+
+def test_crossover_never_mates_with_the_replaced_culture() -> None:
+    # 2文化しかなければ相手がいないので単親コピーに落ちる
+    cultures = make_flat_cultures([0.0, 1.0], [0.7, 0.3])
+    renewed, parent = select_and_mutate(
+        cultures, np.random.default_rng(0), replaced=1,
+        sigma_relative=0.0, crossover="uniform",
+    )
+    assert renewed == ["culture1"] and parent == "culture0"
+    assert torch.equal(cultures[1].theta_sp, cultures[0].theta_sp)
+
+
+def test_crossover_resets_inherited_fitness() -> None:
+    cultures = make_flat_cultures([0.0, 1.0, 2.0], [0.7, 0.5, 0.3])
+    for culture in cultures:
+        culture.fitness = culture.win_rate
+    select_and_mutate(
+        cultures, np.random.default_rng(0), replaced=1, crossover="uniform"
+    )
+    assert cultures[2].fitness is None  # 生まれ直した文化は過去の適応度を引き継がない
+
+
+# --- 適応度 EMA / 変異のみ --------------------------------------------------
+
+
+def test_fitness_ema_overrides_last_generation_win_rate() -> None:
+    # その世代の勝率では culture0 が最下位だが、EMA では最上位 → 淘汰されない
+    cultures = make_cultures([0.2, 0.5, 0.6])
+    cultures[0].fitness, cultures[1].fitness, cultures[2].fitness = 0.9, 0.5, 0.2
+    renewed, parent = select_and_mutate(cultures, np.random.default_rng(0), replaced=1)
+    assert parent == "culture0"
+    assert renewed == ["culture2"]
+
+
+def test_drift_mutates_everyone_and_replaces_nobody() -> None:
+    cultures = make_cultures([0.7, 0.5, 0.3])  # ages は既定の 5
+    before = [c.theta_sp.clone() for c in cultures]
+    renewed, parent = select_and_mutate(
+        cultures, np.random.default_rng(0), replaced=1, selection="drift"
+    )
+    assert renewed == [] and parent == "-"
+    for culture, original in zip(cultures, before, strict=True):
+        assert not torch.equal(culture.theta_sp, original)  # 全員が動く
+        assert culture.age == 5  # 誰も生まれ直していない
+    assert [c.win_rate for c in cultures] == [0.7, 0.5, 0.3]  # 勝率は触らない
+
+
+# --- BLX-α (2026-09-11: 交叉が分散を縮める問題への対処) ---------------------
+
+
+def variance_ratio(alpha: float, seed: int = 0) -> float:
+    """独立な二親を交叉したとき、子の分散が親の分散の何倍になるかを実測する。"""
+    rng = np.random.default_rng(seed)
+    generator = torch.Generator().manual_seed(seed)
+    parents = torch.randn(2, 4096, 1, generator=generator)
+    children = torch.stack([
+        crossover_theta(parents[0], parents[1], "uniform", rng, alpha=alpha)
+        for _ in range(64)
+    ])
+    return float(children.var()) / float(parents.var())
+
+
+def test_plain_crossover_shrinks_variance_to_two_thirds() -> None:
+    # E[β²]+E[(1-β)²] = 1/3 + 1/3。子は必ず両親の内側にしか置けない
+    assert variance_ratio(0.0) == pytest.approx(2 / 3, rel=0.05)
+
+
+def test_blx_alpha_expands_variance_as_the_formula_says() -> None:
+    # 倍率 = 2((1+2α)²/12 + 1/4)
+    for alpha in (0.366, 0.5):
+        expected = 2 * ((1 + 2 * alpha) ** 2 / 12 + 0.25)
+        assert variance_ratio(alpha) == pytest.approx(expected, rel=0.05)
+    assert variance_ratio(0.366) == pytest.approx(1.0, rel=0.05)  # α≈0.366 で中立
+
+
+def test_blx_alpha_places_children_outside_the_parents() -> None:
+    rng = np.random.default_rng(0)
+    parents = (torch.zeros(64, 1), torch.ones(64, 1))
+    inside = crossover_theta(*parents, "uniform", rng, alpha=0.0)
+    assert inside.min() >= 0.0 and inside.max() <= 1.0
+    outside = crossover_theta(*parents, "uniform", rng, alpha=0.5)
+    assert outside.min() < 0.0 or outside.max() > 1.0  # 親の外にも子が置ける
+    assert outside.min() >= -0.5 and outside.max() <= 1.5  # ただし U(-α, 1+α) の範囲内
+
+
+def test_crossover_alpha_reaches_select_and_mutate() -> None:
+    cultures = make_flat_cultures([0.0, 1.0, 2.0], [0.7, 0.5, 0.3])
+    select_and_mutate(
+        cultures, np.random.default_rng(3), replaced=1,
+        sigma_relative=0.0, crossover="uniform", crossover_alpha=0.5,
+    )
+    child = cultures[2].theta_sp  # 親は 0.0 と 1.0 の定数なので子の値 = β
+    assert child.min() < 0.0 or child.max() > 1.0
