@@ -150,8 +150,9 @@ uv run pytest                # ※初期リポジトリは全テストskipでグ
 
 ```bash
 uv sync --group train        # torch が要る (既定の sync からは外してある)
-uv run python scripts/play_server.py \
-  --checkpoint checkpoints/league_E2b_grace/league.pt --host 0.0.0.0
+uv run python scripts/play_server.py --host 0.0.0.0   # 既定で league_E2b_grace を読む
+# E7 で指すなら: --checkpoint checkpoints/league_E7_ema/league.pt
+# 文化を選ぶなら: --culture culture1   (E2b では culture1 が最強 = ppo2 相手に 0.692)
 ```
 起動時に `mood: 感情GRU / relations: r_ij状態 / council: ON` と出れば正常です。
 Unity 側は **Python を起動してから** Play してください (接続は Unity からの一方向で、
