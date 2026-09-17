@@ -139,24 +139,60 @@ uv run pytest                # ※初期リポジトリは全テストskipでグ
                              #   (テストは各Phaseの実装と同時に有効化していく)
 ```
 
-#### 学習済みモデル
+#### 学習済みモデル (対局サーバで使うモデルの選び方)
 対局サーバが読むモデルは通常 `checkpoints/` ごと Git 管理外ですが、**共有用の 2 つだけは
 リポジトリに入っています**。clone すればそのまま対局できます。
 
-| ファイル | 中身 |
-|---|---|
-| `checkpoints/league_E2b_grace/league.pt` | **デモはこちら**。ppo2 相手に文化平均 0.633 で最も強い |
-| `checkpoints/league_E7_ema/league.pt` | 最新 (2026-09-12)。適応度 EMA の実験条件で、強さは 0.540 |
+| ファイル | 中身 | 既定 |
+|---|---|---|
+| `checkpoints/league_E2b_grace/league.pt` | **デモはこちら**。ppo2 相手に文化平均 0.633 で最も強い | ○ |
+| `checkpoints/league_E7_ema/league.pt` | 最新 (2026-09-12)。適応度 EMA の実験条件で、強さは 0.540 | |
 
+**起動 (Python を先に。Unity 側から Python は起動できません)**
 ```bash
-uv sync --group train        # torch が要る (既定の sync からは外してある)
-uv run python scripts/play_server.py --host 0.0.0.0   # 既定で league_E2b_grace を読む
-# E7 で指すなら: --checkpoint checkpoints/league_E7_ema/league.pt
-# 文化を選ぶなら: --culture culture1   (E2b では culture1 が最強 = ppo2 相手に 0.692)
+uv sync --group train                                  # torch が要る (既定の sync からは外してある)
+uv run python scripts/play_server.py --host 0.0.0.0    # 引数なし = E2b の保存時の文化 (culture4)
 ```
-起動時に `mood: 感情GRU / relations: r_ij状態 / council: ON` と出れば正常です。
-Unity 側は **Python を起動してから** Play してください (接続は Unity からの一方向で、
-Unity 側が Python を起動することはできません)。詳細は `docs/INTERFACE.md` §4。
+起動直後の 1 行目で何が載ったかを確認してください:
+```
+checkpoint: league.pt / culture: culture4 (保存時のまま。--culture で選べるのは culture0, ...) / device: cpu / tau: 0.1 / mood: 感情GRU / relations: r_ij状態 / council: ON
+```
+`mood: 感情GRU / relations: r_ij状態 / council: ON` の 3 つが出ていれば正常です。
+その後 Unity を Play → モード選択ボタンで対局開始 (`docs/INTERFACE.md` §4)。
+
+**モデルを差し替える (`--checkpoint`)**
+```bash
+uv run python scripts/play_server.py --host 0.0.0.0 --checkpoint checkpoints/league_E7_ema/league.pt
+```
+
+**文化 (棋風) を差し替える (`--culture`)**
+`league.pt` は 1 つの共有ネットワークと 6 つの「文化」(駒の性格パラメータ θ_sp) を持っていて、
+どの文化で指すかを選べます。省略時は保存時に載っていた文化 (E2b では culture4) で、
+これは学習ループの順番で最後に評価された個体にすぎず、最強という意味ではありません。
+```bash
+uv run python scripts/play_server.py --host 0.0.0.0 --culture culture1
+uv run python scripts/play_server.py --host 0.0.0.0 --checkpoint checkpoints/league_E7_ema/league.pt --culture culture2
+```
+E2b の各文化の強さ (ppo2 相手の勝率, 60 局):
+
+| culture0 | **culture1** | culture2 | culture3 | culture4 (既定) | culture5 |
+|---|---|---|---|---|---|
+| 0.525 | **0.692** | 0.608 | 0.683 | 0.617 | 0.675 |
+
+存在しない名前を渡すと選べる一覧を出して止まります。`ppo2.pt` など文化を持たない
+チェックポイントでは `culture: -` と出て、`--culture` は使えません。
+
+**切り替えの手順**: 対局中や Unity 側から切り替える口はありません。
+Python を Ctrl+C で止める → 引数を変えて起動し直す → Unity を Play し直す (接続は `Start()` で
+1 回しか走らないので、Play 中のままだと繋ぎ直しません)。同じサーバに繋いだ人は全員同じ文化で
+指します。人ごとに変えたい場合は `--port` を変えて別プロセスを立てます。
+
+**その他の引数**: `--human white` (人間が後手) / `--tau 0` (AI を argmax に) / `--device cuda` /
+`--selfcheck` (Unity なしで乱択相手に 1 局回す。Python 側だけの疎通確認に使う)。
+
+**モデルを更新する場合**: 2 つは追跡済みなので上書きして `git add` するだけで置き換わります。
+ただし 1 回ごとに履歴へ 20MB 積まれるので、頻繁に更新する運用にはしないこと。3 つ目を足すときは
+`git add -f` が要ります (未追跡の `*.pt` は ignore 対象)。この表にも 1 行足してください。
 
 ### Unity側 (担当: U1/U2)
 ```
