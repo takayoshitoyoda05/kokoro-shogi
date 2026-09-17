@@ -18,7 +18,7 @@ namespace KokoroShogi.Core
         public void LoadSfen(string sfen)
         {
             if (string.IsNullOrWhiteSpace(sfen)) throw new ArgumentException("SFENが空です。", nameof(sfen));
-            string[] fields = sfen.Split(' ');
+            string[] fields = sfen.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
             string[] ranks = fields[0].Split('/');
             if (ranks.Length != 9) throw new FormatException("SFEN盤面は9段必要です。");
             squares.Clear();
@@ -28,8 +28,18 @@ namespace KokoroShogi.Core
                 bool promoted = false;
                 foreach (char token in ranks[rank])
                 {
-                    if (char.IsDigit(token)) { fileIndex += token - '0'; continue; }
-                    if (token == '+') { promoted = true; continue; }
+                    if (token >= '1' && token <= '9')
+                    {
+                        if (promoted) throw new FormatException("成り記号の直後に空マスがあります。");
+                        fileIndex += token - '0';
+                        continue;
+                    }
+                    if (token == '+')
+                    {
+                        if (promoted) throw new FormatException("成り記号が重複しています。");
+                        promoted = true;
+                        continue;
+                    }
                     if (fileIndex >= 9) throw new FormatException("SFENの筋数が9を超えています。");
                     int owner = char.IsUpper(token) ? 0 : 1;
                     string species = Species(char.ToUpperInvariant(token), promoted);

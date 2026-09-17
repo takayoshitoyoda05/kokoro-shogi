@@ -11,9 +11,10 @@ using Unity.VisualScripting;
 using UnityEngine.SceneManagement;
 using KokoroShogi.Net;
 
-public class GameSceneDirector : MonoBehaviour
+public partial class GameSceneDirector : MonoBehaviour
 {
     [SerializeField] PieceCameraAnimator pieceCameraAnimator;
+    ServerBoardSynchronizer serverBoard;
 
     void Awake()
     {
@@ -21,10 +22,13 @@ public class GameSceneDirector : MonoBehaviour
             pieceCameraAnimator = GetComponent<PieceCameraAnimator>();
         if (!pieceCameraAnimator)
             pieceCameraAnimator = gameObject.AddComponent<PieceCameraAnimator>();
+        serverBoard = GetComponent<ServerBoardSynchronizer>();
+        if (!serverBoard) serverBoard = gameObject.AddComponent<ServerBoardSynchronizer>();
     }
 
     //UI関連
     [SerializeField] TMP_Text textTurnInfo;
+    [SerializeField] TMP_Text textTurnNumber;
     [SerializeField] TMP_Text textResultInfo;
     [SerializeField] Button buttonTitle;
     [SerializeField] Button buttonRematch;
@@ -111,6 +115,18 @@ public class GameSceneDirector : MonoBehaviour
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
     {
+        // 既存シーンでは同じCanvas内の手数表示を自動で参照する。
+        if (!textTurnNumber && textTurnInfo && textTurnInfo.canvas)
+        {
+            foreach (TMP_Text label in textTurnInfo.canvas.GetComponentsInChildren<TMP_Text>(true))
+            {
+                if (label.name != "TextTurnNumber") continue;
+                textTurnNumber = label;
+                break;
+            }
+        }
+        SetMoveCount(0);
+
         //UI関連初期設定
         buttonTitle.gameObject.SetActive(false);
         buttonRematch.gameObject.SetActive(false);
@@ -227,6 +243,12 @@ public class GameSceneDirector : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
+        if (serverBoard.HasServerState)
+        {
+            if (serverBoard.CanSelectMove && nowMode == Mode.Select) selectMode();
+            if (nextMode != Mode.None) { nowMode = nextMode; nextMode = Mode.None; }
+            return;
+        }
         if (Mode.Start == nowMode)
         {
             startMode();
@@ -309,6 +331,20 @@ public class GameSceneDirector : MonoBehaviour
             promote = false,
             drop_species = isDrop ? GetDropSpecies(unit.UnitType) : null
         };
+        if (serverBoard.HasServerState)
+        {
+            bool normalAllowed = serverBoard.IsLegal(pendingPlayerMove, false);
+            bool promotionAllowed = serverBoard.IsLegal(pendingPlayerMove, true);
+            if (!normalAllowed && !promotionAllowed) { pendingMoveUnit = null; pendingPlayerMove = null; return Mode.Select; }
+            if (normalAllowed && promotionAllowed)
+            {
+                textResultInfo.text = "成りますか？";
+                buttonEvolutionApply.gameObject.SetActive(true);
+                buttonEvolutionCancel.gameObject.SetActive(true);
+                return Mode.WaitEvolution;
+            }
+            return BeginPendingMove(promotionAllowed);
+        }
         bool canPromote = !isDrop && unit.isEvolution()
             && (enemyLines[nowPlayer].Contains(tileindex.y) || enemyLines[nowPlayer].Contains(unit.Pos.y));
         // 最奥の歩・香、最奥二段の桂は不成では次に動けない。
@@ -335,8 +371,15 @@ public class GameSceneDirector : MonoBehaviour
         buttonEvolutionCancel.gameObject.SetActive(false);
         textResultInfo.text = "";
         setSelectCursors();
+        if (serverBoard.HasServerState)
+        {
+            pendingPlayerMove.promote = promote;
+            serverBoard.RequestMove(pendingPlayerMove);
+            pendingPlayerMove = null;
+            return Mode.Select;
+        }
         bool capture = units[destination.x, destination.y] != null;
-        if ((capture || promote) && pieceCameraAnimator && pieceCameraAnimator.isActiveAndEnabled)
+        if ((capture || promote) && pieceCameraAnimator && pieceCameraAnimator.IsAvailable)
         {
             StartCoroutine(PlayPendingMove(unit, destination, promote));
             return Mode.Animating;
@@ -373,7 +416,14 @@ public class GameSceneDirector : MonoBehaviour
         unit.FieldStatus = FieldStatus.OnBoard;
         if (promote) unit.Evolution();
         alignCaptureUnits(nowPlayer);
+        SetMoveCount(turnCount + 1);
         SendPendingPlayerMove(promote);
+    }
+
+    void SetMoveCount(int ply)
+    {
+        turnCount = ply;
+        if (textTurnNumber) textTurnNumber.text = $"{turnCount}手";
     }
 
     // 配列は左下が(0, 0)。将棋の筋段は右上が11、左下が99。
@@ -384,7 +434,7 @@ public class GameSceneDirector : MonoBehaviour
         return $"{9 - position.x}{9 - position.y}";
     }
 
-    static string GetDropSpecies(UnitType type)
+    public static string GetDropSpecies(UnitType type)
     {
         switch (type)
         {
@@ -415,6 +465,8 @@ public class GameSceneDirector : MonoBehaviour
     //移動可能範囲の取得
     List<Vector2Int> getMovableTiles(UnitController unit)
     {
+        if (serverBoard.HasServerState)
+            return serverBoard.GetDestinations(unit);
         //通常移動範囲
         List<Vector2Int> ret = unit.GetMovableTiles(units);
 
@@ -562,12 +614,6 @@ public class GameSceneDirector : MonoBehaviour
 
         //次のプレイヤーへ
         nowPlayer = GetNextPlayer(nowPlayer);
-
-        //経過ターン
-        if (0 == nowPlayer)
-        {
-            turnCount++;
-        }
 
         nextMode = Mode.Start;
     }

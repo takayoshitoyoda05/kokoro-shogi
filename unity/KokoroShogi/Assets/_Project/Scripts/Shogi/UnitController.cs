@@ -32,6 +32,8 @@ public enum FieldStatus
 
 public class UnitController : MonoBehaviour
 {
+    // Pythonの恒久ID。移動・成り・獲得でも同じ駒として追跡する。
+    public string PieceId { get; internal set; }
     //ユニットのプレイヤー番号
     public int Player;
     //ユニットの種類

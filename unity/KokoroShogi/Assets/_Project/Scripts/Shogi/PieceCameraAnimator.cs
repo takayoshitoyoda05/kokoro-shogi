@@ -4,6 +4,8 @@ using UnityEngine;
 [DisallowMultipleComponent]
 public sealed class PieceCameraAnimator : MonoBehaviour
 {
+    [Tooltip("オフにすると駒のカメラ演出を省略します。演出中にオフにした場合は元のカメラ位置へ戻します。")]
+    [SerializeField] bool enablePieceCamera = true;
     [SerializeField] Camera targetCamera;
     [Tooltip("注視点からカメラまでのワールド座標のオフセット")]
     [SerializeField] Vector3 closeUpOffset = new Vector3(0f, 7.5f, -7.5f);
@@ -27,13 +29,14 @@ public sealed class PieceCameraAnimator : MonoBehaviour
     enum Phase { Idle, Approach, AwaitAction, Hold, Return }
     Phase phase;
 
+    public bool IsAvailable => enablePieceCamera && isActiveAndEnabled;
     public bool IsPlaying => phase != Phase.Idle;
     public bool HasReachedFocus => phase == Phase.AwaitAction || phase == Phase.Hold || phase == Phase.Return;
 
     /// <summary>連続呼び出しでも最初のカメラ位置を帰還先として保持する。</summary>
     public void FocusOn(Transform piece)
     {
-        if (!isActiveAndEnabled || !piece) return;
+        if (!IsAvailable || !piece) return;
         FocusAt(piece.position);
         subject = piece;
     }
@@ -41,7 +44,7 @@ public sealed class PieceCameraAnimator : MonoBehaviour
     /// <summary>移動先へ先に接近する。waitForAction指定時はCompleteActionまで帰還しない。</summary>
     public void FocusAt(Vector3 position, bool waitForAction = false)
     {
-        if (!isActiveAndEnabled) return;
+        if (!IsAvailable) return;
         if (!IsPlaying)
         {
             activeCamera = targetCamera ? targetCamera : Camera.main;
@@ -73,6 +76,7 @@ public sealed class PieceCameraAnimator : MonoBehaviour
 
     void LateUpdate()
     {
+        if (!enablePieceCamera) { Cancel(); return; }
         if (!IsPlaying) return;
         if (!activeCamera) { Cancel(); return; }
         elapsed += Time.unscaledDeltaTime;
