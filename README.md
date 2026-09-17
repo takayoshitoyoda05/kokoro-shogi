@@ -139,6 +139,24 @@ uv run pytest                # ※初期リポジトリは全テストskipでグ
                              #   (テストは各Phaseの実装と同時に有効化していく)
 ```
 
+#### 学習済みモデル
+対局サーバが読むモデルは通常 `checkpoints/` ごと Git 管理外ですが、**共有用の 2 つだけは
+リポジトリに入っています**。clone すればそのまま対局できます。
+
+| ファイル | 中身 |
+|---|---|
+| `checkpoints/league_E2b_grace/league.pt` | **デモはこちら**。ppo2 相手に文化平均 0.633 で最も強い |
+| `checkpoints/league_E7_ema/league.pt` | 最新 (2026-09-12)。適応度 EMA の実験条件で、強さは 0.540 |
+
+```bash
+uv sync --group train        # torch が要る (既定の sync からは外してある)
+uv run python scripts/play_server.py \
+  --checkpoint checkpoints/league_E2b_grace/league.pt --host 0.0.0.0
+```
+起動時に `mood: 感情GRU / relations: r_ij状態 / council: ON` と出れば正常です。
+Unity 側は **Python を起動してから** Play してください (接続は Unity からの一方向で、
+Unity 側が Python を起動することはできません)。詳細は `docs/INTERFACE.md` §4。
+
 ### Unity側 (担当: U1/U2)
 ```
 Unity Hub → Installs → 6000.3.8f1 (LTS) を追加 (バージョン固定・他は使わない)
