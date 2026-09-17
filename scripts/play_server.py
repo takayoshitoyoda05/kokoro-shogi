@@ -7,7 +7,8 @@ Unity (WebSocket クライアント) から `game_control` / `move_request` を�
 
 - 推論は既定で CPU (1 手 1 秒未満)。GPU 実験と同居しても干渉しない
 - 接続してきたクライアントごとに独立した `GameSession` を持つ (同時に複数人と指せる)
-- 既定モデルは checkpoints/ppo2.pt (自己対戦 PPO、mood / relations / council 込み)。
+- 既定モデルは checkpoints/league_E2b_grace/league.pt (リポジトリ同梱、mood / relations /
+  council 込み)。ppo2.pt などローカルのチェックポイントも `--checkpoint` で渡せる。
   `--checkpoint` に Phase 2 の方策 (desire_lambda*.pt) を渡すと mood 等はヒューリスティック
 
 使い方::
@@ -52,7 +53,8 @@ from kokoro_shogi.server import server as ws
 from kokoro_shogi.server.game_session import DEFAULT_MAX_PLIES, GameSession, Phase
 from kokoro_shogi.viz.narrator import TemplateNarrator
 
-DEFAULT_CHECKPOINT = REPO_ROOT / "checkpoints" / "ppo2.pt"
+#: リポジトリに同梱している共有モデル (README「学習済みモデル」)。clone 直後でも存在する
+DEFAULT_CHECKPOINT = REPO_ROOT / "checkpoints" / "league_E2b_grace" / "league.pt"
 #: 対局時の既定温度 (export_model_jsonl の 0.25 は多様なサンプル生成用)
 DEFAULT_TAU = 0.1
 #: 受信キューを覗く間隔 (秒)。server.py の receive_any は非ブロッキング
