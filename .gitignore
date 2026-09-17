@@ -15,6 +15,12 @@ runs/
 *.pt
 .env
 
+# 上の checkpoints/ と *.pt の例外: 発表デモ用に共有する 2 つだけ git add -f で追跡する。
+#   checkpoints/league_E2b_grace/league.pt  (最強: ppo2 相手に文化平均 0.633)
+#   checkpoints/league_E7_ema/league.pt     (最新: 2026-09-12, 適応度EMA)
+# 追跡済みファイルに ignore 規則は効かないので、以後の更新は通常どおり差分に出る。
+# 共有物を増やすときは README の「学習済みモデル」を更新してから add -f すること。
+
 # ===== Unity (unity/KokoroShogi/ 配下の生成物) =====
 unity/KokoroShogi/.utmp/
 unity/KokoroShogi/[Ll]ibrary/
