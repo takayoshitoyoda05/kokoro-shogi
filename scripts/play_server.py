@@ -15,6 +15,7 @@ Unity (WebSocket クライアント) から `game_control` / `move_request` を�
 
     uv run python scripts/play_server.py                       # 人間が先手、port 8765
     uv run python scripts/play_server.py --human white --tau 0  # 人間が後手、AI は argmax
+    uv run python scripts/play_server.py --culture culture1     # リーグの文化を選んで指す
     uv run python scripts/play_server.py --selfcheck            # 接続せずに乱択で 1 局回して終了
 
 Unity 側の手順: 接続 → `{"schema":"1.0","type":"game_control","command":"start"}` を送る →
@@ -133,12 +134,43 @@ class ModelEngine:
         return state, move
 
 
-def load_runner(checkpoint: Path, device: torch.device) -> ModelRunner:
-    """感情GRU入り (mood_gru を持つ) なら mood_checkpoint として、そうでなければ方策だけ読む。"""
+def load_runner(
+    checkpoint: Path, device: torch.device, *, culture: str | None = None
+) -> tuple[ModelRunner, str]:
+    """感情GRU入り (mood_gru を持つ) なら mood_checkpoint として、そうでなければ方策だけ読む。
+
+    戻り値の 2 つ目は起動表示用に「どの文化の θ_sp で指すか」を表す文字列。
+    """
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     if "mood_gru" in state:
-        return ModelRunner(checkpoint, device, mood_checkpoint=checkpoint)
-    return ModelRunner(checkpoint, device)
+        runner = ModelRunner(checkpoint, device, mood_checkpoint=checkpoint)
+    else:
+        runner = ModelRunner(checkpoint, device)
+    return runner, apply_culture(runner, state.get("cultures", {}), culture)
+
+
+def apply_culture(runner: ModelRunner, cultures: dict, name: str | None) -> str:
+    """リーグ (train/league.py) のチェックポイントなら、文化 `name` の θ_sp を trunk に差し込む。
+
+    league.pt の `model` には、保存した時点で trunk に載っていた文化の θ_sp がそのまま残る
+    (ループ順で最後に評価した文化で、意図して選ばれたものではない)。`name` が無ければ
+    それをそのまま使い、どの文化と一致するかを表示用に返すだけにする。
+    """
+    if name is None:
+        if not cultures:
+            return "-"
+        theta = runner.model.personality.theta_species.weight.detach().cpu()
+        match = [n for n, c in cultures.items() if torch.equal(theta, c["theta_sp"])]
+        return (
+            f"{match[0] if match else '不明'} (保存時のまま。--culture で選べるのは"
+            f" {', '.join(cultures)})"
+        )
+    if name not in cultures:
+        available = ", ".join(cultures) or "無し (リーグのチェックポイントではない)"
+        raise SystemExit(f"--culture {name}: そのような文化はない。選べるのは {available}")
+    theta = runner.model.personality.theta_species.weight
+    theta.data.copy_(cultures[name]["theta_sp"].to(theta.device))
+    return name
 
 
 def as_wire(message) -> dict:
@@ -236,6 +268,11 @@ def main() -> None:
         default=DEFAULT_CHECKPOINT,
         help="ppo2.pt / league.pt など感情GRU入り、または desire_lambda*.pt (Phase 2 方策)",
     )
+    parser.add_argument(
+        "--culture",
+        default=None,
+        help="リーグ (league.pt) の文化名。その θ_sp で指す (例: culture1)。省略時は保存時のまま",
+    )
     parser.add_argument("--human", choices=["black", "white"], default="black", help="人間の手番")
     parser.add_argument("--tau", type=float, default=DEFAULT_TAU, help="AI の温度 (0 で argmax)")
     parser.add_argument("--max-plies", type=int, default=DEFAULT_MAX_PLIES)
@@ -251,9 +288,10 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    runner = load_runner(args.checkpoint, device)
+    runner, culture = load_runner(args.checkpoint, device, culture=args.culture)
     print(
-        f"checkpoint: {args.checkpoint.name} / device: {device} / tau: {args.tau}"
+        f"checkpoint: {args.checkpoint.name} / culture: {culture}"
+        f" / device: {device} / tau: {args.tau}"
         f" / mood: {'感情GRU' if runner.gru is not None else 'ヒューリスティック'}"
         f" / relations: {'r_ij状態' if runner.relations else 'ヒューリスティック'}"
         f" / council: {'ON' if runner.council else 'OFF'}"
