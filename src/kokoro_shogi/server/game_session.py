@@ -35,6 +35,7 @@ from kokoro_shogi.logging.jsonl import (
     CareerMvp,
     CareerPiece,
     GameControl,
+    GameResult,
     LegalMove,
     LegalMovesMessage,
     MoveRequest,
@@ -224,12 +225,10 @@ class GameSession:
         if message.command == "start":
             return self._start()
         if message.command == "resign":
-            out: list[_Message] = []
             if self.phase is not Phase.IDLE and self.tracker is not None:
-                self.ledger.record(self.tracker.states, self._promoted)
-                out.append(self.ledger.message())
+                return self._finish(reason="resign")
             self._to_idle()
-            return out
+            return []
         self._to_idle()  # reset
         return []
 
@@ -309,11 +308,35 @@ class GameSession:
             or self.board.is_draw() == cshogi.REPETITION_DRAW
         )
 
-    def _finish(self) -> list[_Message]:
+    def _finish(self, *, reason: str | None = None) -> list[_Message]:
+        """終局の career を作る。終局時だけ `result` を付ける (INTERFACE.md §5)。
+
+        `board.turn` は**これから指す側**なので、最後の着手後に詰んでいれば
+        その反対側が勝者になる。`black` は常に先手で人間とは限らないため、
+        人間がどちら側かは `human` で別に伝える。
+        エンジンが手を返せないだけで「詰み」と決めつけない (`engine_no_move`)。
+        """
         assert self.tracker is not None
+        winner = "draw"
+
+        if reason == "resign":
+            winner = "black" if self.ai == BLACK else "white"
+        elif self.board.is_game_over():
+            winner = "white" if self.board.turn == BLACK else "black"
+            reason = "checkmate" if self.board.is_check() else "no_legal_moves"
+        elif self.board.is_draw() == cshogi.REPETITION_DRAW:
+            reason = "repetition"
+        elif self.ply >= self.max_plies:
+            reason = "max_plies"
+        else:
+            # 合法手があるのにエンジンが None を返した異常終了。詰みと誤表示しない
+            reason = "engine_no_move"
+
         self.ledger.record(self.tracker.states, self._promoted)
+        career = self.ledger.message()
+        career.result = GameResult(winner=winner, human=self.human, reason=reason)
         self._to_idle()
-        return [self.ledger.message()]
+        return [career]
 
 
 __all__ = [
