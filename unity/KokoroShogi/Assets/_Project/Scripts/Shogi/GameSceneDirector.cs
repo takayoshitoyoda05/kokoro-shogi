@@ -14,6 +14,10 @@ using KokoroShogi.Net;
 public partial class GameSceneDirector : MonoBehaviour
 {
     [SerializeField] PieceCameraAnimator pieceCameraAnimator;
+    [SerializeField, Min(0f), Tooltip("AIの着手を表示する前に待つ秒数。0で待機なし。")]
+    float aiMoveDelaySeconds = 1f;
+    [SerializeField, Range(0, 1), Tooltip("AI側のプレイヤー番号。先手は0、後手は1。Python側の設定に合わせてください。")]
+    int aiPlayer = 1;
     ServerBoardSynchronizer serverBoard;
 
     void Awake()
@@ -245,7 +249,12 @@ public partial class GameSceneDirector : MonoBehaviour
     {
         if (serverBoard.HasServerState)
         {
-            if (serverBoard.CanSelectMove && nowMode == Mode.Select) selectMode();
+            if (serverBoard.CanSelectMove && nowMode == Mode.Select)
+            {
+                // 最終局面の表示と合法手の受信が揃ってから、詰みを判定する。
+                if (serverBoard.HasNoLegalMoves) startMode();
+                else selectMode();
+            }
             if (nextMode != Mode.None) { nowMode = nextMode; nextMode = Mode.None; }
             return;
         }
@@ -528,7 +537,8 @@ public partial class GameSceneDirector : MonoBehaviour
             textResultInfo.text = "移動できません";
             if (isoute)
             {
-                textResultInfo.text = "詰み\n" + (GetNextPlayer(nowPlayer) + 1) + "Pの勝ち";
+                int winner = GetNextPlayer(nowPlayer);
+                textResultInfo.text = winner == 0 ? "人間の勝ち" : "AIの勝ち";
             }
             nextMode = Mode.Result;
         }
@@ -536,6 +546,8 @@ public partial class GameSceneDirector : MonoBehaviour
         //次が結果表示なら
         if (Mode.Result == nextMode)
         {
+            textResultInfo.gameObject.SetActive(true);
+            textResultInfo.enabled = true;
             textTurnInfo.text = "";
             buttonRematch.gameObject.SetActive(true);
             buttonTitle.gameObject.SetActive(true);

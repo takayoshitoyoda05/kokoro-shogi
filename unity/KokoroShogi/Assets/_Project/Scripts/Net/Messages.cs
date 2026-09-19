@@ -35,5 +35,6 @@ namespace KokoroShogi.Net
     [Serializable] public class GameControl : MessageHeader { public string command; }
     [Serializable] public class CareerPiece { public string piece_id; public string species; public int games; public float survival_rate; public int promotions; public int mvp_count; }
     [Serializable] public class CareerMvp { public string piece_id; public float contribution; }
-    [Serializable] public class CareerMessage : MessageHeader { public List<CareerPiece> pieces = new List<CareerPiece>(); public CareerMvp last_game_mvp; }
+    [Serializable] public class GameResult { public string winner; public int human; public string reason; }
+    [Serializable] public class CareerMessage : MessageHeader { public List<CareerPiece> pieces = new List<CareerPiece>(); public CareerMvp last_game_mvp; public GameResult result; }
 }

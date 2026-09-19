@@ -10,6 +10,21 @@
 処理の流れは `UnityWebSocketClient.Update → MessageRouter → GameEvents.OnStateUpdated
 → ServerBoardSynchronizer → GameSceneDirector.ApplyServerState → UnitController`。
 
+AIの着手前の待ち時間は、`MainGame` の `GameSceneDirector` にある
+`Ai Move Delay Seconds` で秒単位で設定する（初期値1秒、0で待機なし）。
+`Ai Player` はPython側のAIの手番に合わせる（0＝先手、1＝後手、初期値1）。
+AIの着手局面を受信してから、駒の移動・駒打ち・獲得や成りの演出前に待つ。
+Python側の思考時間とは別の表示待ち時間で、待機中は盤の操作を受け付けない。
+初回の局面表示と同一局面の再送には待ち時間を入れない。
+
+終局表示は、Pythonから `career.result` に勝者・人間側の手番・終了理由が届くことを前提とする。
+`ServerBoardSynchronizer` は最後の局面と着手演出が終わるまで結果を保留し、
+`GameSceneDirector.ShowServerResult` が `TextResultInfo` を有効にして勝敗と再戦・タイトル
+ボタンを表示する。終了後の盤面操作は停止する。Python側は担当者による実装待ちのため、
+現状のサーバーだけではこの結果表示は動かない。実装後は `play_server.py` を再起動する。
+旧形式の `career` だけでは終局扱いにしない。担当者向けの依頼内容と実装案は
+リポジトリ直下の `docs/AI_RESULT_HANDOFF.md` と `docs/AI_RESULT_IMPLEMENTATION.md` を参照。
+
 | ファイル | 責務・保持する状態 |
 |---|---|
 | `Net/UnityWebSocketClient.cs`, `MessageRouter.cs` | 接続・送受信・JSON解析（既存） |

@@ -25,9 +25,37 @@ public partial class GameSceneDirector
         nextMode = Mode.None;
     }
 
+    public void ShowServerResult(GameResult result)
+    {
+        setSelectCursors();
+        movableTiles.Clear();
+        pendingMoveUnit = null;
+        pendingPlayerMove = null;
+        buttonEvolutionApply.gameObject.SetActive(false);
+        buttonEvolutionCancel.gameObject.SetActive(false);
+        if (result.reason == "engine_no_move")
+            textResultInfo.text = "AIの着手を取得できず対局終了";
+        else if (result.winner == "draw")
+            textResultInfo.text = "引き分け";
+        else
+        {
+            int winner = result.winner == "black" ? 0 : 1;
+            textResultInfo.text = winner == result.human ? "人間の勝ち" : "AIの勝ち";
+        }
+        textResultInfo.gameObject.SetActive(true);
+        textResultInfo.enabled = true;
+        textTurnInfo.text = "";
+        buttonRematch.gameObject.SetActive(true);
+        buttonTitle.gameObject.SetActive(true);
+        nowMode = Mode.Result;
+        nextMode = Mode.None;
+    }
+
     public IEnumerator ApplyServerState(ReceivedBoardSnapshot snapshot)
     {
         StateUpdate message = snapshot.Message;
+        buttonRematch.gameObject.SetActive(false);
+        buttonTitle.gameObject.SetActive(false);
         setSelectCursors();
         movableTiles.Clear();
         pendingMoveUnit = null;
@@ -40,6 +68,13 @@ public partial class GameSceneDirector
         nextMode = Mode.None;
 
         LastMove move = message.last_move;
+        // 既に表示済みの駒が動くときだけ待つ。初回の局面表示や同じ局面の再送は待たない。
+        bool isNewMove = move != null && ReceivedBoardSnapshot.IsBoardSquare(move.to) &&
+            serverUnits.TryGetValue(move.piece_id ?? "", out UnitController previousUnit) &&
+            (previousUnit.FieldStatus == FieldStatus.Captured || previousUnit.Pos != FromShogiSquare(move.to));
+        if (isNewMove && snapshot.PlayerToMove != aiPlayer && aiMoveDelaySeconds > 0f)
+            yield return new WaitForSeconds(aiMoveDelaySeconds);
+
         bool animate = move != null && (move.capture || move.promote) &&
             ReceivedBoardSnapshot.IsBoardSquare(move.to) &&
             serverUnits.TryGetValue(move.piece_id ?? "", out UnitController movingUnit) &&
