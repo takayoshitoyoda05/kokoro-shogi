@@ -134,6 +134,52 @@ def test_message_types_match_unity_router() -> None:
     }
 
 
+def test_schema_version_matches_unity_constant():
+    """Unity の Protocol.SchemaVersion が Python と一致している。
+
+    ずれていると MessageRouter.cs が毎メッセージ警告を出す。1.1 への更新は U1 の作業
+    (INTERFACE.md §7 手順4)。同期が済んだら PENDING_UNITY_VERSION を None にする。
+    """
+    import re
+
+    from kokoro_shogi.config import REPO_ROOT
+    from kokoro_shogi.logging.jsonl import SCHEMA_VERSION
+
+    PENDING_UNITY_VERSION = "1.0"  # U1 が 1.1 に上げたら None にする
+    messages = (
+        REPO_ROOT / "unity" / "KokoroShogi" / "Assets" / "_Project" / "Scripts" / "Net"
+        / "Messages.cs"
+    )
+    if not messages.exists():
+        return
+    found = re.search(r'SchemaVersion\s*=\s*"([\d.]+)"', messages.read_text(encoding="utf-8"))
+    assert found, "Messages.cs に Protocol.SchemaVersion が見つかりません"
+    unity = found.group(1)
+    expected = PENDING_UNITY_VERSION or SCHEMA_VERSION
+    assert unity == expected, (
+        f"Unity の SchemaVersion={unity} / Python={SCHEMA_VERSION}。"
+        + (
+            "同期が済んだので PENDING_UNITY_VERSION を None にしてください"
+            if unity == SCHEMA_VERSION
+            else "Unity 側の定数を更新してください (INTERFACE.md §7 手順4)"
+        )
+    )
+
+
+def test_career_result_is_optional_on_the_wire():
+    """result が無い career は 1.0 時代と同じ JSON になる (キーが増えない)。"""
+    from kokoro_shogi.logging.jsonl import CareerMessage, GameResult, to_json_line, validate_line
+
+    plain = CareerMessage()
+    assert '"result"' not in to_json_line(plain)
+    assert validate_line(to_json_line(plain)).result is None
+
+    finished = CareerMessage(result=GameResult(winner="draw", human=1, reason="max_plies"))
+    encoded = to_json_line(finished)
+    assert '"winner":"draw"' in encoded and '"human":1' in encoded
+    assert validate_line(encoded).result == finished.result
+
+
 # --- 不正データの検出 -------------------------------------------------------
 
 

@@ -1,0 +1,16 @@
+{
+  "schema": "1.1",
+  "type": "career",
+  "pieces": [
+    {
+      "piece_id": "P77_gen0_0029",
+      "species": "FU",
+      "games": 1,
+      "survival_rate": 1.0,
+      "promotions": 0,
+      "mvp_count": 0
+    }
+  ],
+  "last_game_mvp": { "piece_id": "R28_gen0_0009", "contribution": 2.3 },
+  "result": { "winner": "white", "human": 0, "reason": "checkmate" }
+}

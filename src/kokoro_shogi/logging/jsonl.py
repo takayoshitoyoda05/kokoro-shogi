@@ -31,7 +31,7 @@ from pydantic.functional_serializers import SerializerFunctionWrapHandler
 
 from kokoro_shogi.core.pieces import Species
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 # --- 値域つきの型 (INTERFACE.md §3 のコメントをそのまま制約にする) -----------
 
@@ -61,7 +61,9 @@ class _Strict(BaseModel):
 class _Message(_Strict):
     """全メッセージ共通のヘッダ (INTERFACE.md §1)。"""
 
-    schema_: Literal["1.0"] = Field(default=SCHEMA_VERSION, alias="schema")
+    #: 1.1 で career.result を追加 (既存フィールドは無変更なので後方互換)。
+    #: 旧ログを読めるよう "1.0" も受け付ける。Unity は不一致時に警告のみで処理は続行 (§1)
+    schema_: Literal["1.0", "1.1"] = Field(default=SCHEMA_VERSION, alias="schema")
 
 
 # --- §3 state_update --------------------------------------------------------
@@ -222,10 +224,45 @@ class CareerMvp(_Strict):
     contribution: float
 
 
+class GameResult(_Strict):
+    """終局の結果 (INTERFACE.md §5)。`career.result` として終局時だけ付く。
+
+    `winner` は盤の先後で表す (`black` が常に先手で、人間とは限らない)。
+    Unity が「あなたの勝ち」を出せるよう、人間がどちら側かを `human` で必ず併せて送る。
+    """
+
+    winner: Literal["black", "white", "draw"]
+    #: 人間の手番 (0=先手 / 1=後手)
+    human: Literal[0, 1]
+    reason: Literal[
+        "checkmate",
+        "no_legal_moves",
+        "repetition",
+        "max_plies",
+        "resign",
+        #: 合法手があるのにエンジンが手を返せなかった異常終了。詰みと誤表示しないための区別
+        "engine_no_move",
+    ]
+
+
 class CareerMessage(_Message):
     type: Literal["career"] = "career"
     pieces: list[CareerPiece] = Field(default_factory=list)
     last_game_mvp: CareerMvp | None = None
+    #: 終局時だけ入る。起動時の成績配信や旧ログでは None (キー自体を省く)
+    result: GameResult | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_result(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """`result` が無いときはキーごと省く。
+
+        `career` は起動時の成績配信にも使うので、終局でない career に result=null が
+        付くと Unity 側が終局と誤認しかねない。旧形式の JSON もそのまま保てる。
+        """
+        data = handler(self)
+        if self.result is None:
+            data.pop("result", None)
+        return data
 
 
 #: type の値 → モデル。MessageRouter.cs の switch と対応する

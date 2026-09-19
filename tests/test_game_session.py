@@ -124,6 +124,9 @@ def test_resign_reports_career_and_returns_to_idle():
     out = session.handle({"schema": "1.0", "type": "game_control", "command": "resign"})
     assert len(out) == 1 and isinstance(out[0], CareerMessage)
     assert len(out[0].pieces) == 40 and all(p.games == 1 for p in out[0].pieces)
+    # 人間 (先手) が投了したので AI (後手) の勝ち
+    assert out[0].result.winner == "white"
+    assert out[0].result.reason == "resign"
     assert session.phase is Phase.IDLE
     # 待機中の resign / reset は何も返さない
     assert session.handle({"schema": "1.0", "type": "game_control", "command": "resign"}) == []
@@ -148,6 +151,11 @@ def test_checkmate_by_human_ends_game_with_career():
     assert session.phase is Phase.IDLE
     # 盤上の4駒 (k, G, R, K) が全員生存で career に載る
     assert len(out[1].pieces) == 4 and all(p.survival_rate == 1.0 for p in out[1].pieces)
+    assert out[1].result.winner == "black"
+    assert out[1].result.human == BLACK
+    assert out[1].result.reason == "checkmate"
+    # ワイヤ形式を往復しても result が保たれる
+    assert validate_line(to_json_line(out[1])).result == out[1].result
 
 
 def test_max_plies_ends_game_as_draw():
@@ -170,6 +178,8 @@ def test_max_plies_ends_game_as_draw():
     )
     assert isinstance(out[-1], CareerMessage)
     assert session.ply == 4 and session.phase is Phase.IDLE
+    assert out[-1].result.winner == "draw"
+    assert out[-1].result.reason == "max_plies"
 
 
 def test_legal_move_wire_format_matches_interface_examples():
@@ -232,3 +242,65 @@ def test_move_request_from_unity_jsonutility_with_empty_drop_species():
     out = request(session, {"from": "77", "to": "76", "promote": False, "drop_species": ""})
     assert [type(m) for m in out] == [StateUpdate, StateUpdate, LegalMovesMessage]
     assert out[0].last_move.from_ == "77" and out[0].last_move.to == "76"
+
+
+@pytest.mark.parametrize("human", [BLACK, WHITE])
+def test_ai_checkmate_reports_winner_after_final_state(human):
+    """AI が詰ませた場合、人間が先手でも後手でも勝者の表示が逆転しない。
+
+    `winner` は盤の先後 (black/white) で、人間がどちら側かは `human` で別に伝わる。
+    学習済みモデルを使わず、詰ませる手を固定する。
+    """
+
+    class MatingEngine(RandomEngine):
+        def step(self, board, tracker, ply, record, *, ai_moved):
+            state, move = super().step(
+                board, tracker, ply, record, ai_moved=ai_moved,
+            )
+            if ply == 0:
+                move = board.move_from_usi("6g5h" if human == BLACK else "6c5b")
+                assert board.is_legal(move)
+            return state, move
+
+    sfen = (
+        "4r3k/9/9/9/9/9/3g5/9/4K4 w - 1" if human == BLACK
+        else "4k4/9/3G5/9/9/9/9/9/4R3K b - 1"
+    )
+    session = GameSession(MatingEngine(), human=human, initial_sfen=sfen)
+    out = start(session)
+    assert [type(m) for m in out] == [StateUpdate, StateUpdate, CareerMessage]
+    assert session.board.is_game_over()
+    assert session.phase is Phase.IDLE
+    result = validate_line(to_json_line(out[-1])).result
+    assert result.winner == ("white" if human == BLACK else "black")
+    assert result.human == human
+    assert result.reason == "checkmate"
+    # 終局後の着手は受け付けない
+    assert request(session, {"from": "59", "to": "49"}) == []
+
+
+def test_check_with_escape_does_not_report_result():
+    """王手でも逃げ道があれば終局にしない (結果画面を誤って出さない)。"""
+    session = GameSession(
+        RandomEngine(), human=WHITE,
+        initial_sfen="4k4/9/9/9/9/9/9/9/4R3K w - 1",
+    )
+    out = start(session)
+    assert session.board.is_check() and not session.board.is_game_over()
+    assert [type(m) for m in out] == [StateUpdate, LegalMovesMessage]
+    assert out[-1].moves and session.phase is Phase.HUMAN_TURN
+
+
+def test_career_without_result_omits_the_key():
+    """起動時の成績配信など、終局でない career には result キー自体が出ない。
+
+    `result: null` が出ると Unity 側が終局と誤認しかねないため
+    (INTERFACE.md §5、`CareerMessage._omit_absent_result`)。
+    """
+    session = GameSession(RandomEngine())
+    start(session)
+    plain = session.ledger.message()
+    assert plain.result is None
+    encoded = to_json_line(plain)
+    assert '"result"' not in encoded
+    assert validate_line(encoded).result is None
