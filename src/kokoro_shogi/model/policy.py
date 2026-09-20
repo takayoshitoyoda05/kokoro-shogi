@@ -130,6 +130,9 @@ class KokoroPolicy(nn.Module):
                 self.proposal_embed = ProposalEmbedding(self.model_config)
                 self.council_rounds = DEFAULT_ROUNDS
                 self.council_top_k = DEFAULT_TOP_K
+                #: 学習時にラウンド数を引く集合 (空なら常に council_rounds)。
+                #: train/mood_distill.py の --council-round-choices から設定する
+                self.council_round_choices: tuple[int, ...] = ()
             self.personality = PersonalityWeights(
                 self.model_config,
                 num_species=NUM_SPECIES,
@@ -217,10 +220,23 @@ class KokoroPolicy(nn.Module):
 
         重み共有なので `rounds` は推論時に自由に変えられる (Gate の R=1..4 比較)。
         各ラウンドの提案は**そのラウンド開始時点のスコア** $s^{(r-1)}$ で選ぶ。
+
+        **random loop sampling** (2026-09-19、STARS/ICML2026 由来): `council_round_choices`
+        を設定すると、学習時 (`self.training`) に限りラウンド数をその集合から一様に引く。
+        固定 R だけで学習すると R を変えたときに性能が崩れる (実測: R=2 で 46.16% がピーク、
+        R=3 で 43.74%、R=4 で 40.26%)。学習中に R を散らすと、どの深さでも成立する
+        潜在動力学を学ぶことが期待できる。`rounds` を明示した場合はそちらが優先される
+        (評価時の R 掃引は従来どおり)。
         """
         from kokoro_shogi.model.council import CouncilRoundLog, top_proposals
 
-        resolved = self.council_rounds if rounds is None else rounds
+        if rounds is not None:
+            resolved = rounds
+        elif self.training and self.council_round_choices:
+            index = int(torch.randint(len(self.council_round_choices), (1,)))
+            resolved = self.council_round_choices[index]
+        else:
+            resolved = self.council_rounds
         logs: list[CouncilRoundLog] = []
         for _ in range(resolved):
             masked = self._mask_scores(scores, mask, legal)

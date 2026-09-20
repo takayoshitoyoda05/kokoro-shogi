@@ -171,3 +171,61 @@ def test_council_gradients_flow_through_rounds() -> None:
     loss.backward()
     assert model.proposal_embed.from_piece.weight.grad is not None
     assert model.proposal_embed.from_piece.weight.grad.abs().sum() > 0
+
+
+def test_random_loop_sampling_varies_rounds_only_in_training() -> None:
+    """council_round_choices は学習時だけラウンド数を散らし、評価時は既定 R に戻る。
+
+    会議は trunk 最終2層の重み共有再適用なので、ラウンド数が変われば議事録の長さが変わる。
+    それを数えることで、実際に引かれた R を外から観測できる。
+    """
+    from kokoro_shogi.config import FeatureFlags, ModelConfig
+    from kokoro_shogi.model.policy import KokoroPolicy
+
+    small = ModelConfig(d_model=32, n_layers=2, n_heads=4)
+    model = KokoroPolicy(small, FeatureFlags(council=True), head="desire")
+    assert model.council_round_choices == ()
+
+    batch = _council_batch(small)
+    # 既定 (choices 空) は学習中でもラウンド数が動かない
+    model.train()
+    assert {len(model(**batch).council) for _ in range(8)} == {model.council_rounds}
+
+    model.council_round_choices = (1, 2, 3, 4)
+    model.train()
+    seen = {len(model(**batch).council) for _ in range(40)}
+    assert seen <= {1, 2, 3, 4}
+    assert len(seen) > 1, f"学習時にラウンド数が散らばっていない: {seen}"
+
+    # 評価時は既定に固定される (物差しの再現性のため)
+    model.eval()
+    assert {len(model(**batch).council) for _ in range(8)} == {model.council_rounds}
+
+    # rounds を明示したときは学習中でも指定が勝つ (R 掃引の評価が壊れない)
+    model.train()
+    assert {len(model(**batch, rounds=3).council) for _ in range(8)} == {3}
+
+
+def _council_batch(config) -> dict:
+    """会議が走る最小の入力 (平手初期局面)。"""
+    import cshogi
+
+    from kokoro_shogi.core.tokenizer import PieceTokenizer
+    from kokoro_shogi.data.dataset import legal_move_mask
+
+    board = cshogi.Board()
+    tokens = PieceTokenizer().tokenize(board)
+    legal = legal_move_mask(board, tokens.position, tokens.owner, tokens.species, tokens.mask)
+
+    def long_(array):
+        return torch.from_numpy(array.astype("int64"))[None]
+
+    return {
+        "species": long_(tokens.species),
+        "position": long_(tokens.position),
+        "owner": long_(tokens.owner),
+        "promoted": long_(tokens.promoted),
+        "mask": torch.from_numpy(tokens.mask)[None],
+        "turn": torch.zeros(1, dtype=torch.long),
+        "legal": torch.from_numpy(legal)[None],
+    }
