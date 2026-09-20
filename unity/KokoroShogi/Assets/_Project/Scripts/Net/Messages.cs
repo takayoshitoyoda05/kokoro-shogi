@@ -5,7 +5,7 @@ namespace KokoroShogi.Net
 {
     public static class Protocol
     {
-        public const string SchemaVersion = "1.0";
+        public const string SchemaVersion = "1.1";
     }
 
     [Serializable] public class MessageHeader { public string schema; public string type; }

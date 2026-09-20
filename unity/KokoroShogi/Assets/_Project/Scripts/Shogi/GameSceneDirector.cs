@@ -22,6 +22,8 @@ public partial class GameSceneDirector : MonoBehaviour
 
     void Awake()
     {
+        InitializeSelectionScreen();
+        InitializeResultHistory();
         if (!pieceCameraAnimator)
             pieceCameraAnimator = GetComponent<PieceCameraAnimator>();
         if (!pieceCameraAnimator)
@@ -33,11 +35,98 @@ public partial class GameSceneDirector : MonoBehaviour
     //UI関連
     [SerializeField] TMP_Text textTurnInfo;
     [SerializeField] TMP_Text textTurnNumber;
-    [SerializeField] TMP_Text textResultInfo;
+    [SerializeField, Tooltip("成り確認・王手・対局結果を表示するTextResultInfoのTMP_Textを設定してください。")]
+    TMP_Text textResultInfo;
     [SerializeField] Button buttonTitle;
     [SerializeField] Button buttonRematch;
     [SerializeField] Button buttonEvolutionApply;
     [SerializeField] Button buttonEvolutionCancel;
+
+    [Header("キャンバス切り替え")]
+    [SerializeField] UnityEngine.UI.Button toScoreBoard;
+    [SerializeField] UnityEngine.UI.Button toModeSelection;
+    [SerializeField] GameObject canvasResult;
+    [SerializeField] GameObject canvasModeSelection;
+    bool isWaitingForModeSelection;
+
+    void InitializeSelectionScreen()
+    {
+        isWaitingForModeSelection = canvasModeSelection != null;
+        if (canvasResult) canvasResult.SetActive(false);
+        if (canvasModeSelection) canvasModeSelection.SetActive(true);
+        HideEndGameControls();
+    }
+
+    void HideEndGameControls()
+    {
+        SetEndGameButtonVisible(buttonTitle, false);
+        SetEndGameButtonVisible(buttonRematch, false);
+        if (buttonEvolutionApply) buttonEvolutionApply.gameObject.SetActive(false);
+        if (buttonEvolutionCancel) buttonEvolutionCancel.gameObject.SetActive(false);
+        if (textResultInfo)
+        {
+            textResultInfo.text = "";
+            textResultInfo.gameObject.SetActive(false);
+        }
+    }
+
+    public void BeginSelectedGame()
+    {
+        isWaitingForModeSelection = false;
+        resultRecordedForCurrentGame = false;
+        if (canvasResult) canvasResult.SetActive(false);
+        HideEndGameControls();
+    }
+
+    void OnEnable()
+    {
+        ShowCanvasToggleButtons();
+        if (toScoreBoard) toScoreBoard.onClick.AddListener(OnClickToScoreBoard);
+        if (toModeSelection) toModeSelection.onClick.AddListener(OnClickToModeSelection);
+        if (canvasResult && canvasModeSelection && canvasResult.activeSelf && canvasModeSelection.activeSelf)
+            canvasResult.SetActive(false);
+    }
+
+    void OnDisable()
+    {
+        if (toScoreBoard) toScoreBoard.onClick.RemoveListener(OnClickToScoreBoard);
+        if (toModeSelection) toModeSelection.onClick.RemoveListener(OnClickToModeSelection);
+    }
+
+    public void OnClickToScoreBoard()
+    {
+        ToggleCanvas(canvasResult, canvasModeSelection);
+        if (canvasResult && canvasResult.activeSelf) ScrollResultHistoryToTop();
+    }
+
+    public void OnClickToModeSelection()
+    {
+        ToggleCanvas(canvasModeSelection, canvasResult);
+    }
+
+    void ToggleCanvas(GameObject target, GameObject other)
+    {
+        if (!target) return;
+        // 対局開始前は、モード選択か戦績のどちらかを必ず表示する。
+        bool show = isWaitingForModeSelection || !target.activeSelf;
+        if (other) other.SetActive(false);
+        target.SetActive(show);
+        ShowCanvasToggleButtons();
+    }
+
+    void ShowCanvasToggleButtons()
+    {
+        if (toScoreBoard) toScoreBoard.gameObject.SetActive(true);
+        if (toModeSelection) toModeSelection.gameObject.SetActive(true);
+    }
+
+    void SetEndGameButtonVisible(UnityEngine.UI.Button button, bool visible)
+    {
+        if (!button) return;
+        // 古いシーンで終局用ボタンにも登録されていても、画面切り替えボタンは隠さない。
+        bool isCanvasToggle = button == toScoreBoard || button == toModeSelection;
+        button.gameObject.SetActive(isCanvasToggle || visible);
+    }
 
     //ゲーム設定
     const int PlayerMax = 2;
@@ -132,11 +221,7 @@ public partial class GameSceneDirector : MonoBehaviour
         SetMoveCount(0);
 
         //UI関連初期設定
-        buttonTitle.gameObject.SetActive(false);
-        buttonRematch.gameObject.SetActive(false);
-        buttonEvolutionApply.gameObject.SetActive(false);
-        buttonEvolutionCancel.gameObject.SetActive(false);
-        textResultInfo.text = "";
+        HideEndGameControls();
 
         //ボードサイズ
         boardWidth = boardSetting.GetLength(0);
@@ -247,6 +332,7 @@ public partial class GameSceneDirector : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
+        if (isWaitingForModeSelection) return;
         if (serverBoard.HasServerState)
         {
             if (serverBoard.CanSelectMove && nowMode == Mode.Select)
@@ -348,6 +434,8 @@ public partial class GameSceneDirector : MonoBehaviour
             if (normalAllowed && promotionAllowed)
             {
                 textResultInfo.text = "成りますか？";
+                textResultInfo.gameObject.SetActive(true);
+                textResultInfo.enabled = true;
                 buttonEvolutionApply.gameObject.SetActive(true);
                 buttonEvolutionCancel.gameObject.SetActive(true);
                 return Mode.WaitEvolution;
@@ -364,6 +452,8 @@ public partial class GameSceneDirector : MonoBehaviour
         if (canPromote && !mustPromote)
         {
             textResultInfo.text = "成りますか？";
+            textResultInfo.gameObject.SetActive(true);
+            textResultInfo.enabled = true;
             buttonEvolutionApply.gameObject.SetActive(true);
             buttonEvolutionCancel.gameObject.SetActive(true);
             return Mode.WaitEvolution;
@@ -379,6 +469,7 @@ public partial class GameSceneDirector : MonoBehaviour
         buttonEvolutionApply.gameObject.SetActive(false);
         buttonEvolutionCancel.gameObject.SetActive(false);
         textResultInfo.text = "";
+        textResultInfo.gameObject.SetActive(false);
         setSelectCursors();
         if (serverBoard.HasServerState)
         {
@@ -432,7 +523,7 @@ public partial class GameSceneDirector : MonoBehaviour
     void SetMoveCount(int ply)
     {
         turnCount = ply;
-        if (textTurnNumber) textTurnNumber.text = $"{turnCount}手";
+        if (textTurnNumber) textTurnNumber.text = $"{turnCount}";
     }
 
     // 配列は左下が(0, 0)。将棋の筋段は右上が11、左下が99。
@@ -523,6 +614,7 @@ public partial class GameSceneDirector : MonoBehaviour
         if (isoute)
         {
             textResultInfo.text = "王手！";
+            textResultInfo.gameObject.SetActive(true);
         }
 
         int movablecount = 0;
@@ -538,7 +630,9 @@ public partial class GameSceneDirector : MonoBehaviour
             if (isoute)
             {
                 int winner = GetNextPlayer(nowPlayer);
-                textResultInfo.text = winner == 0 ? "人間の勝ち" : "AIの勝ち";
+                textResultInfo.text = winner == aiPlayer ? "AIの勝ち（詰み）" : "人間の勝ち（詰み）";
+                // 通信対局の勝敗・人間側は、確定したcareer.resultを使う。
+                if (!serverBoard.HasServerState) RecordCheckmateResult(winner != aiPlayer);
             }
             nextMode = Mode.Result;
         }
@@ -549,8 +643,8 @@ public partial class GameSceneDirector : MonoBehaviour
             textResultInfo.gameObject.SetActive(true);
             textResultInfo.enabled = true;
             textTurnInfo.text = "";
-            buttonRematch.gameObject.SetActive(true);
-            buttonTitle.gameObject.SetActive(true);
+            SetEndGameButtonVisible(buttonRematch, true);
+            SetEndGameButtonVisible(buttonTitle, true);
         }
 
     }
@@ -558,6 +652,7 @@ public partial class GameSceneDirector : MonoBehaviour
     //ユニットとタイル選択
     void selectMode()
     {
+        if (isWaitingForModeSelection || (canvasResult && canvasResult.activeSelf)) return;
         //モード選択画面の表示中は、背後の盤や駒をクリックさせない
         if (!ModeSelectionManager.IsWorldInteractionAllowed) return;
         if (pieceCameraAnimator && pieceCameraAnimator.IsPlaying) return;
@@ -771,9 +866,9 @@ public partial class GameSceneDirector : MonoBehaviour
         SceneManager.LoadScene("MainGame");
     }
 
-    //タイトルへ
-    public void OnClickTitle()
-    {
-        SceneManager.LoadScene("TitleScene");
-    }
+    // //タイトルへ
+    // public void OnClickTitle()
+    // {
+    //     SceneManager.LoadScene("TitleScene");
+    // }
 }

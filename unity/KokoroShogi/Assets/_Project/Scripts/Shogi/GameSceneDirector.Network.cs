@@ -27,6 +27,8 @@ public partial class GameSceneDirector
 
     public void ShowServerResult(GameResult result)
     {
+        // 接続直後に前回の終局情報が届いても、開始画面には表示しない。
+        if (isWaitingForModeSelection) return;
         setSelectCursors();
         movableTiles.Clear();
         pendingMoveUnit = null;
@@ -41,12 +43,17 @@ public partial class GameSceneDirector
         {
             int winner = result.winner == "black" ? 0 : 1;
             textResultInfo.text = winner == result.human ? "人間の勝ち" : "AIの勝ち";
+            if (result.reason == "checkmate")
+            {
+                textResultInfo.text += "（詰み）";
+                RecordCheckmateResult(winner == result.human);
+            }
         }
         textResultInfo.gameObject.SetActive(true);
         textResultInfo.enabled = true;
         textTurnInfo.text = "";
-        buttonRematch.gameObject.SetActive(true);
-        buttonTitle.gameObject.SetActive(true);
+        SetEndGameButtonVisible(buttonRematch, true);
+        SetEndGameButtonVisible(buttonTitle, true);
         nowMode = Mode.Result;
         nextMode = Mode.None;
     }
@@ -54,16 +61,19 @@ public partial class GameSceneDirector
     public IEnumerator ApplyServerState(ReceivedBoardSnapshot snapshot)
     {
         StateUpdate message = snapshot.Message;
-        buttonRematch.gameObject.SetActive(false);
-        buttonTitle.gameObject.SetActive(false);
+        if (message.ply == 0) resultRecordedForCurrentGame = false;
+        // 結果表示はPythonのcareer.resultを受信し、最終局面の演出が終わってから行う。
+        textResultInfo.gameObject.SetActive(false);
+        SetEndGameButtonVisible(buttonRematch, false);
+        SetEndGameButtonVisible(buttonTitle, false);
         setSelectCursors();
         movableTiles.Clear();
         pendingMoveUnit = null;
         pendingPlayerMove = null;
         buttonEvolutionApply.gameObject.SetActive(false);
         buttonEvolutionCancel.gameObject.SetActive(false);
-        buttonTitle.gameObject.SetActive(false);
-        buttonRematch.gameObject.SetActive(false);
+        SetEndGameButtonVisible(buttonTitle, false);
+        SetEndGameButtonVisible(buttonRematch, false);
         nowMode = Mode.Animating;
         nextMode = Mode.None;
 
