@@ -14,7 +14,7 @@ Unity (WebSocket クライアント) から `game_control` / `move_request` を�
 使い方::
 
     uv run python scripts/play_server.py                       # 人間が先手、port 8765
-    uv run python scripts/play_server.py --human white --tau 0  # 人間が後手、AI は argmax
+    uv run python scripts/play_server.py --human white --tau 0.1  # 人間が後手、AI の手を揺らす
     uv run python scripts/play_server.py --culture culture1     # リーグの文化を選んで指す
     uv run python scripts/play_server.py --selfcheck            # 接続せずに乱択で 1 局回して終了
 
@@ -54,10 +54,25 @@ from kokoro_shogi.server import server as ws
 from kokoro_shogi.server.game_session import DEFAULT_MAX_PLIES, GameSession, Phase
 from kokoro_shogi.viz.narrator import TemplateNarrator
 
-#: リポジトリに同梱している共有モデル (README「学習済みモデル」)。clone 直後でも存在する
-DEFAULT_CHECKPOINT = REPO_ROOT / "checkpoints" / "league_E2b_grace" / "league.pt"
-#: 対局時の既定温度 (export_model_jsonl の 0.25 は多様なサンプル生成用)
-DEFAULT_TAU = 0.1
+#: 既定モデル。2026-09-19 の外部基準 (対 やねうら王+Háo depth 1、序盤ブック付き 100 局) で
+#: 最強だった ppo2.pt (0.23、蒸留のみの phase37 と同等) を優先し、無ければ同梱の league
+#: (E7 0.16 > E2b 0.10〜0.13)。対 ppo2 の自己相対勝率で選ぶと逆順になるので、既定は外部基準で決める
+#: (docs/decisions/2026-09-19-treeless-strength-survey.md)
+_CHECKPOINT_PREFERENCE = (
+    REPO_ROOT / "checkpoints" / "ppo2.pt",
+    REPO_ROOT / "checkpoints" / "league_E7_ema" / "league.pt",
+    REPO_ROOT / "checkpoints" / "league_E2b_grace" / "league.pt",
+)
+DEFAULT_CHECKPOINT = next(
+    (path for path in _CHECKPOINT_PREFERENCE if path.exists()), _CHECKPOINT_PREFERENCE[-1]
+)
+#: 対局時の既定温度。外部基準 (対 Háo depth 1、序盤ブック付き) でも argmax (0.23) が
+#: τ=0.1 (0.16) より上。
+#: 多様な棋譜が欲しいときは --tau 0.1 (export_model_jsonl の 0.25 はサンプル生成用)
+DEFAULT_TAU = 0.0
+#: league.pt を使うときの既定の文化。外部基準では文化間の差は SE 内なので、
+#: 対 ppo2 で最も強かった culture1 を据え置く
+DEFAULT_CULTURE = "culture1"
 #: 受信キューを覗く間隔 (秒)。server.py の receive_any は非ブロッキング
 POLL_INTERVAL = 0.02
 
@@ -70,9 +85,15 @@ class ModelEngine:
     m^(t) = GRU(u_ev(直前の手), m^(t-1)) を、その手の後の局面で更新する。
     """
 
-    def __init__(self, runner: ModelRunner, *, tau: float, seed: int) -> None:
+    def __init__(
+        self, runner: ModelRunner, *, tau: float, seed: int, mate_check: bool = True
+    ) -> None:
         self.runner = runner
         self.tau = tau
+        #: 指す前に 1 手詰を探す (cshogi の mate_move_in_1ply)。方策は詰みを平気で逃すので、
+        #: 見つかれば議論の結果より優先する。同評価で argmax 単体 0.78 → +1手詰 0.825
+        self.mate_check = mate_check
+        self.prev_mate = False
         self.seed = seed
         self.generator = torch.Generator().manual_seed(seed)
         self.narrator = TemplateNarrator()
@@ -84,6 +105,7 @@ class ModelEngine:
         self.mood_state = None
         self.relation_state = None
         self.prev_council = []
+        self.prev_mate = False
 
     def step(
         self,
@@ -119,7 +141,10 @@ class ModelEngine:
         if ai_moved and record is not None and self.prev_council:
             council = self.prev_council
             meta = {s.piece_id: (s.species, s.owner) for s in tracker.states.values()}
-            narration = self.narrator.narrate(council, record.piece_id, meta)
+            if self.prev_mate:
+                narration = "詰みを発見したので議論を打ち切った。"
+            else:
+                narration = self.narrator.narrate(council, record.piece_id, meta)
         state = build_state_update(
             runner, board, tracker, ply, record, output, legal, tokens,
             self.mood_state, self.relation_state, council, narration,
@@ -127,8 +152,16 @@ class ModelEngine:
 
         move: int | None = None
         self.prev_council = []
+        self.prev_mate = False
         if legal.any() and not board.is_game_over():
-            move = sample_move(output, build_action_map(board, tokens), self.tau, self.generator)
+            mate = board.mate_move_in_1ply() if self.mate_check else 0
+            if mate:
+                move = int(mate)
+                self.prev_mate = True
+            else:
+                move = sample_move(
+                    output, build_action_map(board, tokens), self.tau, self.generator
+                )
             states = sorted(tracker.states.values(), key=lambda item: item.piece_id)
             self.prev_council = council_rounds_from_output(output, states)
         return state, move
@@ -146,7 +179,10 @@ def load_runner(
         runner = ModelRunner(checkpoint, device, mood_checkpoint=checkpoint)
     else:
         runner = ModelRunner(checkpoint, device)
-    return runner, apply_culture(runner, state.get("cultures", {}), culture)
+    cultures = state.get("cultures", {})
+    if culture is None and DEFAULT_CULTURE in cultures:
+        culture = DEFAULT_CULTURE  # 保存時の文化ではなく、測って一番強かった文化を既定にする
+    return runner, apply_culture(runner, cultures, culture)
 
 
 def apply_culture(runner: ModelRunner, cultures: dict, name: str | None) -> str:
@@ -271,10 +307,16 @@ def main() -> None:
     parser.add_argument(
         "--culture",
         default=None,
-        help="リーグ (league.pt) の文化名。その θ_sp で指す (例: culture1)。省略時は保存時のまま",
+        help=f"リーグ (league.pt) の文化名。その θ_sp で指す。省略時は {DEFAULT_CULTURE} "
+        "(無ければ保存時のまま)",
     )
     parser.add_argument("--human", choices=["black", "white"], default="black", help="人間の手番")
-    parser.add_argument("--tau", type=float, default=DEFAULT_TAU, help="AI の温度 (0 で argmax)")
+    parser.add_argument(
+        "--tau", type=float, default=DEFAULT_TAU, help="AI の温度 (既定 0 = argmax。0.1 で揺らぐ)"
+    )
+    parser.add_argument(
+        "--no-mate-check", action="store_true", help="指す前の 1 手詰チェックを切る (既定 ON)"
+    )
     parser.add_argument("--max-plies", type=int, default=DEFAULT_MAX_PLIES)
     parser.add_argument("--host", default=ws.DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=ws.DEFAULT_PORT)
@@ -291,7 +333,7 @@ def main() -> None:
     runner, culture = load_runner(args.checkpoint, device, culture=args.culture)
     print(
         f"checkpoint: {args.checkpoint.name} / culture: {culture}"
-        f" / device: {device} / tau: {args.tau}"
+        f" / device: {device} / tau: {args.tau} / mate1: {'OFF' if args.no_mate_check else 'ON'}"
         f" / mood: {'感情GRU' if runner.gru is not None else 'ヒューリスティック'}"
         f" / relations: {'r_ij状態' if runner.relations else 'ヒューリスティック'}"
         f" / council: {'ON' if runner.council else 'OFF'}"
@@ -299,7 +341,9 @@ def main() -> None:
     human = BLACK if args.human == "black" else WHITE
 
     def make_engine() -> ModelEngine:
-        return ModelEngine(runner, tau=args.tau, seed=args.seed)
+        return ModelEngine(
+            runner, tau=args.tau, seed=args.seed, mate_check=not args.no_mate_check
+        )
 
     if args.selfcheck:
         selfcheck(make_engine, human, args.max_plies)

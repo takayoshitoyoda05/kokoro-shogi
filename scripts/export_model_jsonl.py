@@ -162,8 +162,13 @@ class ModelRunner:
         mood: torch.Tensor | None = None,
         relation: torch.Tensor | None = None,
         effect: np.ndarray | None = None,
+        rounds: int | None = None,
     ):
-        """モデルを1回走らせて (PolicyOutput, 合法手マスク) を返す。"""
+        """モデルを1回走らせて (PolicyOutput, 合法手マスク) を返す。
+
+        `rounds` で会議 [D] のラウンド数を上書きできる (重み共有なので推論時に自由)。
+        None ならモデル既定 (R=2)。
+        """
         legal = legal_move_mask(
             board, tokens.position, tokens.owner, tokens.species, tokens.mask
         )
@@ -182,6 +187,7 @@ class ModelRunner:
             legal=torch.from_numpy(legal)[None].to(self.device),
             mood=mood,
             relation=relation,
+            rounds=rounds,
         )
         return output, legal
 
