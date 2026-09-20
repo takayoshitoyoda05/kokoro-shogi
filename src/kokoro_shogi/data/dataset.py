@@ -24,7 +24,7 @@ $40 \\times 81 \\times 2 = 6480$ 通り。DESIGN.md §5 出典表の「src-dst�
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,10 @@ NUM_MOVE_TO = NUM_SQUARES
 NUM_PROMOTE = 2
 #: 方策の出力次元 40 × 81 × 2
 NUM_ACTIONS = MAX_PIECES * NUM_MOVE_TO * NUM_PROMOTE
+
+#: エンジン教師の側面ファイル (scripts/ops/join_teacher.py の *.teacher.npz) の列と MultiPV 数
+TEACHER_K = 4
+TEACHER_COLUMNS = ("teacher_value", "teacher_actions", "teacher_cps")
 
 #: シャードに入っている列 (make_labels.py の ShardBuilder.add と対応)
 SHARD_COLUMNS = (
@@ -88,6 +92,14 @@ class Position:
     action: int  # 教師手の action index
     result: int  # 勝敗 z (手番側視点) ∈ {-1, 0, +1}
     labels: np.ndarray  # (40, 6) float32 欲求ラベル
+    #: エンジン教師 (無ければ NaN / -1)。value は手番側視点 ∈ [-1, 1]
+    teacher_value: float = float("nan")
+    teacher_actions: np.ndarray = field(
+        default_factory=lambda: np.full(TEACHER_K, -1, dtype=np.int64)
+    )
+    teacher_cps: np.ndarray = field(
+        default_factory=lambda: np.full(TEACHER_K, np.nan, dtype=np.float32)
+    )
 
 
 def tokens_to_board(
@@ -183,8 +195,11 @@ class ShardDataset:
         self.with_legal = with_legal
         self.with_effect = with_effect
 
-        columns: dict[str, list[np.ndarray]] = {name: [] for name in SHARD_COLUMNS}
+        columns: dict[str, list[np.ndarray]] = {
+            name: [] for name in SHARD_COLUMNS + TEACHER_COLUMNS
+        }
         total = 0
+        self.teacher_shards = 0
         for path in paths:
             with np.load(path) as shard:
                 missing = set(SHARD_COLUMNS) - set(shard.files)
@@ -195,6 +210,17 @@ class ShardDataset:
                     take = min(take, max_positions - total)
                 for name in SHARD_COLUMNS:
                     columns[name].append(shard[name][:take])
+            # エンジン教師の側面ファイル。無いシャードは「教師なし」で埋める
+            side = path.with_suffix(".teacher.npz")
+            if side.exists():
+                with np.load(side) as teacher:
+                    for name in TEACHER_COLUMNS:
+                        columns[name].append(teacher[name][:take])
+                self.teacher_shards += 1
+            else:
+                columns["teacher_value"].append(np.full(take, np.nan, dtype=np.float32))
+                columns["teacher_actions"].append(np.full((take, TEACHER_K), -1, dtype=np.int64))
+                columns["teacher_cps"].append(np.full((take, TEACHER_K), np.nan, dtype=np.float32))
             total += take
             if max_positions is not None and total >= max_positions:
                 break
@@ -244,6 +270,9 @@ class ShardDataset:
             ),
             result=int(column["result"][index]),
             labels=column["labels"][index].astype(np.float32) / 255.0,
+            teacher_value=float(column["teacher_value"][index]),
+            teacher_actions=column["teacher_actions"][index].astype(np.int64),
+            teacher_cps=column["teacher_cps"][index].astype(np.float32),
         )
 
     def __iter__(self) -> Iterator[Position]:
@@ -271,12 +300,25 @@ def collate(batch: list[Position]) -> dict[str, Any]:
         "action": torch.tensor([item.action for item in batch], dtype=torch.long),
         "result": torch.tensor([item.result for item in batch], dtype=torch.float32),
         "labels": torch.from_numpy(stack([item.labels for item in batch])),
+        "teacher_value": torch.tensor(
+            [item.teacher_value for item in batch], dtype=torch.float32
+        ),
+        "teacher_actions": torch.from_numpy(stack([item.teacher_actions for item in batch])),
+        "teacher_cps": torch.from_numpy(stack([item.teacher_cps for item in batch])),
     }
 
 
 def find_shards(directory: Path | str) -> list[Path]:
-    """ディレクトリ以下の shard_*.npz を名前順で集める。"""
-    return sorted(Path(directory).rglob("shard_*.npz"))
+    """ディレクトリ以下の shard_*.npz を名前順で集める。
+
+    エンジン教師の側面ファイル `shard_NNNN.teacher.npz` (scripts/ops/join_teacher.py) は
+    同じ glob に引っかかるが本体ではないので除く (列が違うので読むと KeyError になる)。
+    """
+    return sorted(
+        path
+        for path in Path(directory).rglob("shard_*.npz")
+        if not path.name.endswith(".teacher.npz")
+    )
 
 
 def split_shards(paths: list[Path], val_ratio: float = 0.05) -> tuple[list[Path], list[Path]]:
@@ -305,6 +347,7 @@ __all__ = [
     "NUM_PROMOTE",
     "Position",
     "ShardDataset",
+    "TEACHER_K",
     "action_index",
     "collate",
     "decode_action",

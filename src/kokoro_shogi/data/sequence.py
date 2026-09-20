@@ -23,16 +23,16 @@ import numpy as np
 from kokoro_shogi.core.effects import piece_effect_matrix
 from kokoro_shogi.core.piece_state import PieceIdTracker
 from kokoro_shogi.core.squares import NUM_SQUARES
-from kokoro_shogi.core.tokenizer import MAX_PIECES
+from kokoro_shogi.core.tokenizer import MAX_PIECES, PieceTokenizer
 from kokoro_shogi.data.dataset import (
     NUM_MOVE_TO,
     NUM_PROMOTE,
     SHARD_COLUMNS,
+    TEACHER_COLUMNS,
+    TEACHER_K,
     action_index,
     legal_move_mask,
 )
-from kokoro_shogi.data.labels import NUM_AXES
-from kokoro_shogi.core.tokenizer import PieceTokenizer
 from kokoro_shogi.model.mood import NUM_EVENT_FEATURES, build_event_features
 
 
@@ -63,7 +63,11 @@ class GameSequence:
     action: np.ndarray  # (T,) int64
     result: np.ndarray  # (T,) float32
     labels: np.ndarray  # (T, 40, 6) float32
-    events: np.ndarray  # (T, 40, 8) float32
+    events: np.ndarray  # (T, 40, 9) float32
+    #: エンジン教師 (scripts/ops/join_teacher.py の側面ファイル)。無い手は NaN / -1
+    teacher_value: np.ndarray  # (T,) float32
+    teacher_actions: np.ndarray  # (T, K) int64
+    teacher_cps: np.ndarray  # (T, K) float32
 
     @property
     def length(self) -> int:
@@ -83,12 +87,16 @@ class SequenceDataset:
         if not paths:
             raise ValueError("シャードが1つも指定されていません。")
 
-        columns: dict[str, list[np.ndarray]] = {name: [] for name in SHARD_COLUMNS}
+        columns: dict[str, list[np.ndarray]] = {
+            name: [] for name in SHARD_COLUMNS + TEACHER_COLUMNS
+        }
         boundaries: list[tuple[int, int]] = []
         offset = 0
         initial = _initial_row()
         #: 初期局面から始まらず捨てた断片の数 (0でなければデータ側の要調査サイン)
         self.dropped = 0
+        #: エンジン教師の側面ファイルがあったシャード数
+        self.teacher_shards = 0
 
         for path in paths:
             with np.load(path) as shard:
@@ -117,7 +125,20 @@ class SequenceDataset:
                     boundaries.append((offset + int(start), offset + int(end)))
                 for name in SHARD_COLUMNS:
                     columns[name].append(shard[name])
-                offset += len(index)
+                count = len(index)
+                offset += count
+            side = path.with_suffix(".teacher.npz")
+            if side.exists():
+                with np.load(side) as teacher:
+                    for name in TEACHER_COLUMNS:
+                        columns[name].append(teacher[name][:count])
+                self.teacher_shards += 1
+            else:
+                columns["teacher_value"].append(np.full(count, np.nan, dtype=np.float32))
+                columns["teacher_actions"].append(
+                    np.full((count, TEACHER_K), -1, dtype=np.int64)
+                )
+                columns["teacher_cps"].append(np.full((count, TEACHER_K), np.nan, dtype=np.float32))
             if max_games is not None and len(boundaries) >= max_games:
                 break
 
@@ -193,6 +214,9 @@ class SequenceDataset:
             result=column["result"][rows].astype(np.float32),
             labels=column["labels"][rows].astype(np.float32) / 255.0,
             events=events,
+            teacher_value=column["teacher_value"][rows].astype(np.float32),
+            teacher_actions=column["teacher_actions"][rows].astype(np.int64),
+            teacher_cps=column["teacher_cps"][rows].astype(np.float32),
         )
 
     def __iter__(self):
@@ -210,12 +234,12 @@ def collate_sequences(batch: list[GameSequence]) -> dict:
 
     longest = max(item.length for item in batch)
 
-    def pad(name: str, dtype) -> torch.Tensor:
+    def pad(name: str, dtype, fill: float = 0.0) -> torch.Tensor:
         arrays = []
         for item in batch:
             array = getattr(item, name)
             width = [(0, longest - item.length)] + [(0, 0)] * (array.ndim - 1)
-            arrays.append(np.pad(array, width))
+            arrays.append(np.pad(array, width, constant_values=fill))
         return torch.from_numpy(np.stack(arrays)).to(dtype)
 
     steps = torch.zeros(len(batch), longest, dtype=torch.bool)
@@ -235,6 +259,10 @@ def collate_sequences(batch: list[GameSequence]) -> dict:
         "result": pad("result", torch.float32),
         "labels": pad("labels", torch.float32),
         "events": pad("events", torch.float32),
+        # 教師の詰め物は「教師なし」を表す値にする (0 を入れると偽の教師になる)
+        "teacher_value": pad("teacher_value", torch.float32, fill=np.nan),
+        "teacher_actions": pad("teacher_actions", torch.long, fill=-1),
+        "teacher_cps": pad("teacher_cps", torch.float32, fill=np.nan),
         "steps": steps,
     }
 

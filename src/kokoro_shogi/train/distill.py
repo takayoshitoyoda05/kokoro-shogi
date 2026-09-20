@@ -51,6 +51,7 @@ _AVERAGED = (
     "free_term_penalty",
     "accuracy",
     "explained_ratio",
+    "soft_loss",
 )
 
 
@@ -66,6 +67,8 @@ class Metrics:
     accuracy: float = 0.0
     #: 欲求説明率 E<w,d>² / E s² (DESIGN.md §4a)。head="desire" のときだけ
     explained_ratio: float = 0.0
+    #: エンジン教師 (MultiPV) の soft target 損失。教師のある局面が無ければ 0
+    soft_loss: float = 0.0
     positions: int = 0
 
     def update(self, other: Metrics) -> None:
@@ -89,6 +92,8 @@ class Metrics:
         text += f")  一致率 {self.accuracy * 100:.2f}%"
         if self.explained_ratio:
             text += f"  説明率 {self.explained_ratio * 100:.1f}%"
+        if self.soft_loss:
+            text += f"  soft {self.soft_loss:.4f}"
         return text
 
 
@@ -121,8 +126,13 @@ def compute_loss_tensors(
     """
     action = batch["action"]
     policy_loss = nn.functional.cross_entropy(output.logits, action)
-    value_loss = nn.functional.mse_loss(output.value, batch["result"])
+    value_loss = nn.functional.mse_loss(output.value, value_target(batch, config))
     loss = policy_loss + config.loss.c1 * value_loss
+
+    soft_loss = torch.zeros((), device=action.device)
+    if "teacher_actions" in batch and config.loss.c_soft > 0:
+        soft_loss = teacher_soft_loss(output, batch, config.loss.teacher_temp)
+        loss = loss + config.loss.c_soft * soft_loss
 
     desire_loss = torch.zeros((), device=action.device)
     free_term_penalty = torch.zeros((), device=action.device)
@@ -146,8 +156,50 @@ def compute_loss_tensors(
         "free_term_penalty": free_term_penalty.detach(),
         "accuracy": accuracy,
         "explained_ratio": explained_ratio,
+        "soft_loss": soft_loss.detach(),
     }
     return loss, parts, int(action.shape[0])
+
+
+def value_target(batch: dict[str, Tensor], config: Config) -> Tensor:
+    """value ヘッドの教師。エンジン教師がある局面はそれ (と z の混合)、無ければ勝敗 z。
+
+    勝敗 z は 1 局 1 ビットを全局面で共有する粗い教師で、エンジン評価値
+    (join_teacher.cp_to_value で [-1,1] に写したもの) は局面ごとの密な教師
+    (Ruoss et al. 2024 / Stop Regressing の動機)。混合比は `loss.teacher_value_weight`。
+    """
+    result = batch["result"]
+    teacher = batch.get("teacher_value")
+    if teacher is None:
+        return result
+    has_teacher = torch.isfinite(teacher)
+    weight = config.loss.teacher_value_weight
+    mixed = weight * torch.nan_to_num(teacher) + (1.0 - weight) * result
+    return torch.where(has_teacher, mixed, result)
+
+
+def teacher_soft_loss(
+    output: PolicyOutput, batch: dict[str, Tensor], temperature: float
+) -> Tensor:
+    """MultiPV の soft target。
+
+    $-\sum_k q_k \log\pi(a_k)$、$q = \mathrm{softmax}(\mathrm{cp}_k / T)$。
+
+    one-hot の交差エントロピーは 2 番目の好手も罰するが、こちらは上位 K 手に
+    評価値に応じた確率質量を配る。教師のある局面 (有効な手が 1 つ以上) だけで平均し、
+    無い局面は寄与 0 (バッチに 1 つも無ければ 0)。GPU 同期を避けるためマスク積和で書く。
+    """
+    actions = batch["teacher_actions"]  # (B, K)
+    cps = batch["teacher_cps"]  # (B, K)
+    valid = (actions >= 0) & torch.isfinite(cps)
+    scaled = torch.where(valid, torch.nan_to_num(cps) / temperature, torch.full_like(cps, -1e9))
+    q = torch.softmax(scaled, dim=-1)
+    q = torch.where(valid, q, torch.zeros_like(q))
+    log_probs = torch.log_softmax(output.logits, dim=-1)
+    picked = torch.gather(log_probs, 1, actions.clamp(min=0))  # (B, K)
+    per_row = -(q * picked).sum(dim=-1)
+    rows = valid.any(dim=-1).to(per_row.dtype)
+    return (per_row * rows).sum() / rows.sum().clamp(min=1.0)
 
 
 def compute_loss(

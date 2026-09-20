@@ -14,6 +14,7 @@ Phase 0 のシャードと Phase 1 のモデルをつなぐ層なので、ここ
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import cshogi
 import numpy as np
@@ -183,3 +184,14 @@ def test_shard_rows_are_consistent(shard_dataset: ShardDataset) -> None:
         assert 0.0 <= float(item.labels.min()) and float(item.labels.max()) <= 1.0
         assert item.effect.shape == (MAX_PIECES, MAX_PIECES)
         assert set(np.unique(item.effect)) <= {0, 1, 2}
+
+
+def test_find_shards_skips_teacher_side_files(tmp_path: Path) -> None:
+    """*.teacher.npz は本体と同じ glob に当たるが、列が違うので除外される。"""
+    from kokoro_shogi.data.dataset import find_shards
+
+    (tmp_path / "shard_0000.npz").write_bytes(b"")
+    (tmp_path / "shard_0000.teacher.npz").write_bytes(b"")
+    (tmp_path / "shard_0001.npz").write_bytes(b"")
+    found = find_shards(tmp_path)
+    assert [p.name for p in found] == ["shard_0000.npz", "shard_0001.npz"]

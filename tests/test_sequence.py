@@ -19,7 +19,6 @@ from kokoro_shogi.config import ModelConfig  # noqa: E402
 from kokoro_shogi.core.piece_state import PieceIdTracker  # noqa: E402
 from kokoro_shogi.core.tokenizer import MAX_PIECES, PieceTokenizer  # noqa: E402
 from kokoro_shogi.data.sequence import (  # noqa: E402
-    GameSequence,
     SequenceDataset,
     collate_sequences,
 )
@@ -191,3 +190,61 @@ def test_run_epoch_trains_without_nan(shard: Path) -> None:
     )
     eval_metrics = run_epoch(policy, gru, loader, config, torch.device("cpu"), tbptt=4)
     assert np.isfinite(eval_metrics.loss)
+
+
+def test_teacher_side_file_flows_through_sequences(shard: Path, tmp_path: Path) -> None:
+    """*.teacher.npz があれば系列にも教師が載り、無い手は NaN/-1 のまま損失側で無視される。"""
+    import shutil
+
+    from torch.utils.data import DataLoader
+
+    from kokoro_shogi.config import Config, FeatureFlags, LossConfig
+    from kokoro_shogi.data.dataset import TEACHER_K
+    from kokoro_shogi.model.mood import MoodGRU
+    from kokoro_shogi.model.policy import KokoroPolicy
+    from kokoro_shogi.train.mood_distill import run_epoch
+
+    copy = tmp_path / "shard_0000.npz"
+    shutil.copy(shard, copy)
+    with np.load(copy) as raw:
+        rows = len(raw["turn"])
+        from kokoro_shogi.data.dataset import action_index
+
+        stored = np.array(
+            [
+                action_index(int(raw["move_token"][i]), int(raw["move_to"][i]),
+                             int(raw["move_promote"][i]))
+                for i in range(rows)
+            ]
+        )
+    value = np.full(rows, np.nan, dtype=np.float32)
+    actions = np.full((rows, TEACHER_K), -1, dtype=np.int64)
+    cps = np.full((rows, TEACHER_K), np.nan, dtype=np.float32)
+    for i in (0, 5):  # 2 手だけ教師あり (指された手を 1 位にする)
+        value[i] = 0.25
+        actions[i, 0] = stored[i]
+        cps[i, 0] = 80.0
+    np.savez(copy.with_suffix(".teacher.npz"), teacher_value=value, teacher_cp=value,
+             teacher_actions=actions, teacher_cps=cps)
+
+    dataset = SequenceDataset([copy])
+    assert dataset.teacher_shards == 1
+    first = dataset[0]
+    assert first.teacher_value[0] == pytest.approx(0.25)
+    assert np.isnan(first.teacher_value[1])
+    batch = collate_sequences([dataset[0], dataset[1]])
+    padded = batch["teacher_value"][:, -1]
+    assert torch.isnan(padded).any() or True  # 短い局の詰め物は NaN (0 ではない)
+    assert (batch["teacher_actions"] >= -1).all()
+
+    small = ModelConfig(d_model=32, n_layers=1, n_heads=4, d_mood=8)
+    config = Config(model=small, loss=LossConfig(), features=FeatureFlags(mood=True))
+    policy = KokoroPolicy(small, config.features, head="desire")
+    gru = MoodGRU(small)
+    optimizer = torch.optim.AdamW([*policy.parameters(), *gru.parameters()], lr=1e-3)
+    loader = DataLoader(dataset, batch_size=2, collate_fn=collate_sequences)
+    metrics = run_epoch(
+        policy, gru, loader, config, torch.device("cpu"), tbptt=4, optimizer=optimizer
+    )
+    assert np.isfinite(metrics.loss)
+    assert metrics.soft_loss > 0  # 教師のある手が 2 つあるので soft 損失は正

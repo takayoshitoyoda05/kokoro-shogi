@@ -41,6 +41,11 @@ class LossConfig:
     c1: float = 1.0
     c2: float = 0.5
     c3: float = 0.01
+    #: エンジン教師 (scripts/ops/join_teacher.py の *.teacher.npz) がある局面だけに効く 3 つ。
+    #: 教師の無い局面・無いシャードでは従来どおり (勝敗 z と one-hot CE)
+    c_soft: float = 1.0
+    teacher_temp: float = 200.0
+    teacher_value_weight: float = 1.0
 
 
 @dataclass(frozen=True)
