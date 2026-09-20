@@ -24,7 +24,7 @@ from matplotlib import font_manager  # noqa: E402
 from kokoro_shogi.config import REPO_ROOT  # noqa: E402
 
 #: 検証済みカテゴリカル配色 (スロット順に使う。循環させない)
-SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
+SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#8f5fd6", "#6d6a63")
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
@@ -191,6 +191,8 @@ def figure_league_distance(checkpoints: Path, out_dir: Path) -> None:
         ("E2: 適応度淘汰", "league_E2_run3"),
         ("E2b: +猶予", "league_E2b_grace"),
         ("E6: +ES交叉", "league_E6_crossover"),
+        ("A: 変異のみ", "league_A_drift"),
+        ("E7: 適応度EMA", "league_E7_ema"),
     )
     window = 5
 
@@ -207,6 +209,17 @@ def figure_league_distance(checkpoints: Path, out_dir: Path) -> None:
         ]
         generations = list(range(1, len(values) + 1))
         axes.plot(generations, smoothed, color=SERIES[slot], linewidth=2, zorder=3)
+        # 淘汰なし (A) は枠外まで広がり続けるので、線は枠内だけ描いて注記する
+        if smoothed[-1] > 4.0:
+            exit_at = next(g for g, v in zip(generations, smoothed, strict=True) if v > 4.0)
+            axes.annotate(
+                f"{label}: 淘汰も複製もないと広がり続ける\n"
+                f"(gen{generations[-1]} で {smoothed[-1]:.1f}、枠外)",
+                (exit_at, 3.95), xytext=(exit_at + 4, 3.55), fontsize=9.5, color=SERIES[slot],
+                fontweight="bold", va="top",
+                arrowprops={"arrowstyle": "-", "color": SERIES[slot], "linewidth": 0.8},
+            )
+            continue
         ends.append([smoothed[-1], generations[-1], label, SERIES[slot]])
 
     for end, y_position in zip(
@@ -225,9 +238,10 @@ def figure_league_distance(checkpoints: Path, out_dir: Path) -> None:
     axes.set_ylim(0, 4.0)  # 距離は0が意味を持つ (0 = 全文化が同一)
     finish(
         figure, axes,
-        "どの淘汰方式でも分化は同じ帯に収まる",
-        f"6文化×50世代、{window}世代の移動平均。50世代を通じて 2〜3 の範囲を出ず、"
-        "ES交叉 (E6) だけが一貫して低い",
+        "淘汰があると分化は同じ帯に収まり、無いと際限なく広がる",
+        f"6文化×50世代、{window}世代の移動平均。"
+        "淘汰のある5条件は 2〜3 の帯を出ず (ES交叉 E6 が最も低い)。"
+        "変異だけの A は距離が線形に伸び続けた",
         out_dir / "league_distance.png",
     )
 
@@ -235,19 +249,21 @@ def figure_league_distance(checkpoints: Path, out_dir: Path) -> None:
 def figure_league_strength(checkpoints: Path, out_dir: Path) -> None:
     """淘汰を機能させるかどうかだけが強さを動かす (リーグ実験の結論)。"""
     merged: dict[str, dict] = {}
-    for name in ("league_vs_base.json", "league_vs_base_e6_e2b.json"):
+    for name in ("league_vs_base.json", "league_vs_base_e6_e2b.json", "league_vs_base_a_e7.json"):
         path = checkpoints / name
         if path.exists():
             merged.update(json.loads(path.read_text())["results"])
     runs = (
         ("E1: 乱択淘汰", "league_E1_control"),
+        ("A: 変異のみ (淘汰なし)", "league_A_drift"),
+        ("E7: 適応度EMA", "league_E7_ema"),
         ("E6: 適応度+交叉", "league_E6_crossover"),
         ("E2b: 適応度+猶予", "league_E2b_grace"),
         ("E2: 適応度淘汰", "league_E2_run3"),
     )
     rows = [(label, merged[run]) for label, run in runs if run in merged]
 
-    figure, axes = new_axes(width=7.4, height=3.6)
+    figure, axes = new_axes(width=7.4, height=4.6)
     axes.grid(axis="y", visible=False)
     axes.axvline(50, color=AXIS, linewidth=1.5, linestyle=(0, (4, 3)), zorder=2)
     axes.text(50.6, -0.45, "ppo2 と互角", fontsize=9, color=MUTED)
@@ -276,7 +292,8 @@ def figure_league_strength(checkpoints: Path, out_dir: Path) -> None:
         figure, axes,
         "強さを動かすのは淘汰の有無だけだった",
         "最終6文化 × 各60局。薄い丸が各文化、菱形がその平均。"
-        "乱択淘汰 (E1) だけが負け越し、交叉の有無は解像できない",
+        "乱択 (E1) は負け越し、淘汰なし (A) と適応度EMA (E7) は互角止まり。"
+        "交叉の有無は解像できない",
         out_dir / "league_strength.png",
     )
 

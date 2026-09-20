@@ -20,5 +20,10 @@ loss:
                  # 2026-08-31: 0.03/0.02への引き上げをいずれもargmax診断が知識侵食と
                  # 判定したため原値に回帰。H≈1.0はこのモデルの自然な成熟として受容する
                  # (docs/decisions/2026-08-31-ppo-entropy-c3.md)
+  # エンジン教師 (2026-09-19、docs/decisions/2026-09-19-treeless-strength-survey.md)。
+  # scripts/ops/join_teacher.py が作る *.teacher.npz がある局面だけに効く。
+  c_soft: 1.0            # MultiPV の soft target (-Σ q_k log π(a_k)) の重み
+  teacher_temp: 200.0    # soft target の温度 (cp)。小さいほど 1 位の手に集中する
+  teacher_value_weight: 1.0  # value 教師 (エンジン評価値→[-1,1]) と勝敗 z の混合比。1 = 教師のみ
 
 seed: 42         # 乱数シード (再現性のため全実験で固定)

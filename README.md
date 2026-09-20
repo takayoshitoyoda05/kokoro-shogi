@@ -143,19 +143,25 @@ uv run pytest                # ※初期リポジトリは全テストskipでグ
 対局サーバが読むモデルは通常 `checkpoints/` ごと Git 管理外ですが、**共有用の 2 つだけは
 リポジトリに入っています**。clone すればそのまま対局できます。
 
-| ファイル | 中身 | 既定 |
-|---|---|---|
-| `checkpoints/league_E2b_grace/league.pt` | **デモはこちら**。ppo2 相手に文化平均 0.633 で最も強い | ○ |
-| `checkpoints/league_E7_ema/league.pt` | 最新 (2026-09-12)。適応度 EMA の実験条件で、強さは 0.540 | |
+| ファイル | 中身 | 外部基準 (※) | 既定 |
+|---|---|---|---|
+| `checkpoints/ppo2.pt` | PPO 最終。**外部基準で最強** | **0.23** | ○ (あれば) |
+| `checkpoints/league_E7_ema/league.pt` | 文化リーグ (適応度 EMA)。**棋風 (文化) を選べる** | 0.16 | 次点 |
+| `checkpoints/league_E2b_grace/league.pt` | 文化リーグ (猶予)。対 ppo2 の自己相対では最強だったが外部基準では下 | 0.10〜0.13 | |
+
+※ やねうら王 + Háo (NNUE) を depth 1 に制限した相手に、floodgate の序盤 100 通りから 100 局 (2026-09-19、SE ≈ 0.04)。
+**「対 ppo2 の勝率」で選ぶと順位が逆になる**ので、既定はこの外部基準で決めています
+(経緯は `docs/decisions/2026-09-19-treeless-strength-survey.md`)。`ppo2.pt` はリポジトリ未同梱なので、
+無い環境では E7 → E2b の順に自動で選びます。
 
 **起動 (Python を先に。Unity 側から Python は起動できません)**
 ```bash
 uv sync --group train                                  # torch が要る (既定の sync からは外してある)
-uv run python scripts/play_server.py --host 0.0.0.0    # 引数なし = E2b の保存時の文化 (culture4)
+uv run python scripts/play_server.py --host 0.0.0.0    # 引数なし = ppo2 (無ければ E7)、argmax、1手詰チェック ON
 ```
 起動直後の 1 行目で何が載ったかを確認してください:
 ```
-checkpoint: league.pt / culture: culture4 (保存時のまま。--culture で選べるのは culture0, ...) / device: cpu / tau: 0.1 / mood: 感情GRU / relations: r_ij状態 / council: ON
+checkpoint: ppo2.pt / culture: - / device: cpu / tau: 0.0 / mate1: ON / mood: 感情GRU / relations: r_ij状態 / council: ON
 ```
 `mood: 感情GRU / relations: r_ij状態 / council: ON` の 3 つが出ていれば正常です。
 その後 Unity を Play → モード選択ボタンで対局開始 (`docs/INTERFACE.md` §4)。
@@ -167,17 +173,26 @@ uv run python scripts/play_server.py --host 0.0.0.0 --checkpoint checkpoints/lea
 
 **文化 (棋風) を差し替える (`--culture`)**
 `league.pt` は 1 つの共有ネットワークと 6 つの「文化」(駒の性格パラメータ θ_sp) を持っていて、
-どの文化で指すかを選べます。省略時は保存時に載っていた文化 (E2b では culture4) で、
-これは学習ループの順番で最後に評価された個体にすぎず、最強という意味ではありません。
+どの文化で指すかを選べます。省略時は **culture1**。league.pt に保存されているのは culture4 ですが、
+これは学習ループの順番で最後に評価された個体にすぎません。文化を見せたいデモでは
+`--checkpoint checkpoints/league_E7_ema/league.pt` を使ってください (E2b より外部基準で強い)。
 ```bash
 uv run python scripts/play_server.py --host 0.0.0.0 --culture culture1
 uv run python scripts/play_server.py --host 0.0.0.0 --checkpoint checkpoints/league_E7_ema/league.pt --culture culture2
 ```
-E2b の各文化の強さ (ppo2 相手の勝率, 60 局):
+E2b の各文化の強さ (ppo2 相手の勝率, 60 局, τ=0.1):
 
-| culture0 | **culture1** | culture2 | culture3 | culture4 (既定) | culture5 |
+| culture0 | **culture1 (既定)** | culture2 | culture3 | culture4 (保存時) | culture5 |
 |---|---|---|---|---|---|
 | 0.525 | **0.692** | 0.608 | 0.683 | 0.617 | 0.675 |
+
+**既定の根拠と注意** (2026-09-19): 対 ppo2 の自己相対評価では「E2b culture1 + argmax」が 0.72〜0.83 で最強に
+見えましたが、外部基準 (上の ※) では ppo2 0.23 / phase37 (蒸留のみ) 0.22 / E7 0.16 / E2b 0.10〜0.13 と順位が逆でした。
+自己対戦の中で測った強さは自己対戦の外では通用しない、という実測です。argmax は外部基準でも τ=0.1 より上 (0.23 vs 0.16)、
+1手詰チェックは効果なし (害もなし)。
+
+`--tau 0.1` にすると手が揺らぎます (同じ局面で毎回同じ手になるのを避けたいとき)。
+`--no-mate-check` で 1 手詰チェックを切れます。
 
 存在しない名前を渡すと選べる一覧を出して止まります。`ppo2.pt` など文化を持たない
 チェックポイントでは `culture: -` と出て、`--culture` は使えません。
@@ -187,8 +202,19 @@ Python を Ctrl+C で止める → 引数を変えて起動し直す → Unity �
 1 回しか走らないので、Play 中のままだと繋ぎ直しません)。同じサーバに繋いだ人は全員同じ文化で
 指します。人ごとに変えたい場合は `--port` を変えて別プロセスを立てます。
 
-**その他の引数**: `--human white` (人間が後手) / `--tau 0` (AI を argmax に) / `--device cuda` /
+**その他の引数**: `--human white` (人間が後手) / `--tau 0.1` (AI の手を揺らす) / `--device cuda` /
 `--selfcheck` (Unity なしで乱択相手に 1 局回す。Python 側だけの疎通確認に使う)。
+
+**USI エンジンとして使う (将棋所 / ShogiGUI / ShogiHome)**
+Unity を使わずに、普通の将棋 GUI からこのモデルと対局・検討できます。GUI のエンジン登録に
+次のコマンドを指定してください (作業ディレクトリはリポジトリ直下)。
+```bash
+uv run python scripts/usi_server.py                       # 既定: league_E2b_grace の culture1、1手詰チェック ON
+uv run python scripts/usi_server.py --culture culture3 --tau 0
+```
+GUI の思考ログ (`info string`) に会議の議事録と実況が流れます。探索はしないので `bestmove` は即答です。
+文化・温度・詰みチェックは GUI の `setoption` (Culture / Tau / MateCheck) からも切り替えられます。
+floodgate は CSA プロトコルなので直結できません (将棋所などの CSA 通信対局機能を経由してください)。
 
 **モデルを更新する場合**: 2 つは追跡済みなので上書きして `git add` するだけで置き換わります。
 ただし 1 回ごとに履歴へ 20MB 積まれるので、頻繁に更新する運用にはしないこと。3 つ目を足すときは

@@ -5,7 +5,7 @@ $$m_i^{(t+1)} = \\mathrm{GRU}\\big(u^{ev}_i(s_t, a_t),\\, m_i^{(t)}\\big)$$
 構成は3部品:
 
 - `build_event_features`: 1手 (`MoveRecord`) と指した後の盤面から、駒ごとの
-  イベント特徴 $u^{ev}_i \\in \\mathbb{R}^{8}$ を作る (torch非依存の前処理)。
+  イベント特徴 $u^{ev}_i \\in \\mathbb{R}^{9}$ を作る (torch非依存の前処理)。
   DESIGN.md の例 $u^{ev}_{i,1} = \\sum_{j\\in\\text{被取}} e^{-\\|p(i)-p(j)\\|_1/\\beta}$
   のとおり、駒取りイベントは距離減衰付きで全駒に伝わる —
   **事件現場に近い駒ほど強く動揺する**。
@@ -160,7 +160,7 @@ class MoodGRU(nn.Module):
         return torch.zeros(batch, tokens, self.d_mood, device=device)
 
     def forward(self, events: Tensor, state: Tensor) -> Tensor:
-        """`events` `(B, N, 8)` と `state` `(B, N, d_mood)` → 更新後の状態。"""
+        """`events` `(B, N, 9)` と `state` `(B, N, d_mood)` → 更新後の状態。"""
         batch, tokens, _ = events.shape
         updated = self.cell(
             events.reshape(batch * tokens, NUM_EVENT_FEATURES),
