@@ -68,6 +68,10 @@ _STEP_KEYS = (
     "action",
     "result",
     "labels",
+    # エンジン教師 (無い手は NaN / -1 で、損失側が自動的に無視する)
+    "teacher_value",
+    "teacher_actions",
+    "teacher_cps",
 )
 
 
@@ -252,6 +256,15 @@ def main() -> None:
     parser.add_argument("--val-games", type=int, default=32)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
+        "--council-round-choices", type=int, nargs="+", default=None,
+        help="学習時に会議ラウンド数をこの集合から一様に引く (random loop sampling)。"
+        " 例: --council-round-choices 1 2 3 4。省略すると常に既定 R=2",
+    )
+    parser.add_argument(
+        "--no-teacher", action="store_true",
+        help="エンジン教師 (c_soft / teacher_value_weight) を切る。教師の効果を測る対照用",
+    )
+    parser.add_argument(
         "--amp",
         action="store_true",
         help="bfloat16 autocast で学習する (VRAM節約と高速化。valは常にfp32)",
@@ -260,10 +273,16 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config()
+    if args.no_teacher:
+        config = replace(config, loss=replace(config.loss, c_soft=0.0, teacher_value_weight=0.0))
     set_global_seed(config.seed)
     device = resolve_device(args.device)
 
     dataset = SequenceDataset(find_shards(args.shard_dir), max_games=args.max_games)
+    print(
+        f"教師つきシャード {dataset.teacher_shards} / c_soft {config.loss.c_soft} / "
+        f"teacher_value_weight {config.loss.teacher_value_weight}"
+    )
     if len(dataset) <= args.val_games:
         raise SystemExit(f"対局数が足りません: {len(dataset)} 局 (val {args.val_games} 局)")
     val_set = torch.utils.data.Subset(dataset, range(args.val_games))
@@ -282,6 +301,11 @@ def main() -> None:
         config, args.warm_start, device,
         mood=not args.no_mood, relations=args.relations, council=args.council,
     )
+    if args.council_round_choices:
+        if not args.council:
+            raise SystemExit("--council-round-choices は --council と一緒に使ってください")
+        policy.council_round_choices = tuple(args.council_round_choices)
+        print(f"random loop sampling: 学習時の会議ラウンドを {args.council_round_choices} から引く")
     gru = MoodGRU(config.model).to(device)
     projection = MoodProjection(config.model).to(device)  # 未学習のまま同梱 (後で回帰)
     # ウォームスタート元に学習済みGRU/射影があれば引き継ぐ
@@ -337,6 +361,7 @@ def main() -> None:
                     "relations": args.relations,
                     "council": args.council,
                 },
+                "council_round_choices": list(args.council_round_choices or ()),
             },
             args.out_dir / f"{args.out_name}.pt",
         )
