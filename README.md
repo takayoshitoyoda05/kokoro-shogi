@@ -86,6 +86,7 @@ Blender素材 (blender/, B1/B2管理) が同居。
 |---|---|---|
 | [`DESIGN.md`](./DESIGN.md) | AIアルゴリズム設計書 v2 (数式仕様・出典・学習フロー) | A |
 | [`TEAM_PLAN.md`](./TEAM_PLAN.md) | チーム全体計画 (v4: 役割・10週マイルストーン・運用ルール) | 全員 |
+| [`docs/TECHNICAL_REPORT.md`](./docs/TECHNICAL_REPORT.md) | 技術報告 (表現・アーキテクチャ・学習・推論・評価と、効かなかった施策の実測) | A |
 | [`docs/INTERFACE.md`](./docs/INTERFACE.md) | データ契約の正本 (JSONスキーマ, バージョン管理) | 全員 |
 | [`docs/REPO_STRUCTURE.md`](./docs/REPO_STRUCTURE.md) | リポジトリ構成 (フォルダの意味・置いてよいもの・担当区分) | 全員 |
 | [`docs/GIT_GUIDE.md`](./docs/GIT_GUIDE.md) | Gitの操作手順 (初学者向け: 環境構築・毎日の手順・トラブル対処) | 全員 |
