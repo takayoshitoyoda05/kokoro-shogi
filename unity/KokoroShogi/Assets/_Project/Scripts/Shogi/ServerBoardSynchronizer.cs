@@ -158,4 +158,19 @@ public sealed class ServerBoardSynchronizer : MonoBehaviour
         // 送信時には盤を変更せず、Pythonが確定したstate_updateだけを反映する。
         UnityWebSocketClient.Instance.SendMoveRequest(move);
     }
+
+    public bool RequestRandomMove()
+    {
+        if (!CanSelectMove || legalMoves.moves == null || legalMoves.moves.Count == 0) return false;
+        // 受信済みの合法手だけから選び、RequestMove側で一手番に一回だけ送信する。
+        int first = UnityEngine.Random.Range(0, legalMoves.moves.Count);
+        for (int offset = 0; offset < legalMoves.moves.Count; offset++)
+        {
+            LegalMove move = legalMoves.moves[(first + offset) % legalMoves.moves.Count];
+            if (move == null || !IsLegal(move, move.promote)) continue;
+            RequestMove(move);
+            return true;
+        }
+        return false;
+    }
 }

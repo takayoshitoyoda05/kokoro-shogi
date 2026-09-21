@@ -1,35 +1,60 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using TMPro;
 using UnityEngine;
 
 // 対局履歴の保持と、CanvasResult内の既存Elementへの表示を担当する。
 public partial class GameSceneDirector
 {
+    [Serializable]
     sealed class FinishedGame
     {
-        public DateTime finishedAt;
+        public long finishedAtTicks;
         public int moveCount;
         public bool humanWon;
         public string reason;
     }
 
-    // 再戦時のシーン再読み込みでも保持する。アプリ終了後の保存は行わない。
+    [Serializable]
+    sealed class SavedResultHistory
+    {
+        public List<FinishedGame> games = new List<FinishedGame>();
+    }
+
+    const string ResultHistoryFileName = "result_history.json";
     static readonly List<FinishedGame> resultHistory = new List<FinishedGame>();
+    static bool resultHistoryLoaded;
     readonly List<Transform> resultRows = new List<Transform>();
     Transform resultRowTemplate;
     UnityEngine.UI.ScrollRect resultScroll;
+    [SerializeField] TMP_Text textAiWinNum;
+    [SerializeField] TMP_Text textHumanWinNum;
     bool resultRecordedForCurrentGame;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
     static void ResetResultHistory()
     {
         resultHistory.Clear();
+        resultHistoryLoaded = false;
     }
 
     void InitializeResultHistory()
     {
+        LoadResultHistory();
         if (!canvasResult) return;
+        if (!textAiWinNum || !textHumanWinNum)
+        {
+            foreach (TMP_Text label in canvasResult.GetComponentsInChildren<TMP_Text>(true))
+            {
+                if (!textAiWinNum && string.Equals(label.name, "Text_AIWinNum", StringComparison.OrdinalIgnoreCase))
+                    textAiWinNum = label;
+                else if (!textHumanWinNum && string.Equals(label.name, "Text_HumanWinNum", StringComparison.OrdinalIgnoreCase))
+                    textHumanWinNum = label;
+            }
+        }
+        RefreshWinCounts();
         resultScroll = canvasResult.GetComponentInChildren<UnityEngine.UI.ScrollRect>(true);
         if (!resultScroll || !resultScroll.content) return;
 
@@ -68,16 +93,57 @@ public partial class GameSceneDirector
         resultRecordedForCurrentGame = true;
         resultHistory.Insert(0, new FinishedGame
         {
-            finishedAt = DateTime.Now,
+            finishedAtTicks = DateTime.Now.Ticks,
             moveCount = turnCount,
             humanWon = humanWon,
             reason = reason
         });
+        SaveResultHistory();
         RefreshResultHistory();
+    }
+
+    static string ResultHistoryPath => Path.Combine(Application.persistentDataPath, ResultHistoryFileName);
+
+    void LoadResultHistory()
+    {
+        if (resultHistoryLoaded) return;
+        resultHistoryLoaded = true;
+        try
+        {
+            if (!File.Exists(ResultHistoryPath)) return;
+            SavedResultHistory saved = JsonUtility.FromJson<SavedResultHistory>(
+                File.ReadAllText(ResultHistoryPath, Encoding.UTF8));
+            if (saved?.games == null) return;
+            foreach (FinishedGame game in saved.games)
+            {
+                if (game == null || game.finishedAtTicks < DateTime.MinValue.Ticks ||
+                    game.finishedAtTicks > DateTime.MaxValue.Ticks) continue;
+                resultHistory.Add(game);
+            }
+        }
+        catch (Exception exception)
+        {
+            Debug.LogWarning($"戦績を読み込めませんでした: {exception.Message}");
+        }
+    }
+
+    void SaveResultHistory()
+    {
+        try
+        {
+            Directory.CreateDirectory(Application.persistentDataPath);
+            var saved = new SavedResultHistory { games = new List<FinishedGame>(resultHistory) };
+            File.WriteAllText(ResultHistoryPath, JsonUtility.ToJson(saved), Encoding.UTF8);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogWarning($"戦績を保存できませんでした: {exception.Message}", this);
+        }
     }
 
     void RefreshResultHistory()
     {
+        RefreshWinCounts();
         if (!resultScroll || !resultScroll.content || !resultRowTemplate) return;
 
         // 実際の結果がある分だけ、非表示のサンプルから表示行を生成する。
@@ -102,7 +168,7 @@ public partial class GameSceneDirector
             foreach (TMP_Text label in row.GetComponentsInChildren<TMP_Text>(true))
             {
                 if (label.name.EndsWith("_finTime", StringComparison.Ordinal))
-                    label.text = result.finishedAt.ToString("M/d HH:mm");
+                    label.text = new DateTime(result.finishedAtTicks).ToString("M/d HH:mm");
                 else if (label.name.EndsWith("_AIResultArea", StringComparison.Ordinal))
                 {
                     label.text = result.humanWon ? "LOSE" : "WIN";
@@ -119,6 +185,16 @@ public partial class GameSceneDirector
             // サンプルの文字が一瞬表示されないよう、値を設定してから表示する。
             row.gameObject.SetActive(true);
         }
+    }
+
+    void RefreshWinCounts()
+    {
+        int humanWins = 0;
+        foreach (FinishedGame result in resultHistory)
+            if (result.humanWon) humanWins++;
+
+        if (textHumanWinNum) textHumanWinNum.text = $"{humanWins}勝";
+        if (textAiWinNum) textAiWinNum.text = $"{resultHistory.Count - humanWins}勝";
     }
 
     void ScrollResultHistoryToTop()

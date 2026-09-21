@@ -61,6 +61,8 @@ public partial class GameSceneDirector
         SetEndGameButtonVisible(buttonRematch, true);
         SetEndGameButtonVisible(buttonTitle, true);
         if (buttonResign) buttonResign.gameObject.SetActive(false);
+        CancelPendingRandomMove();
+        randomPlayerMovesEnabled = false;
         nowMode = Mode.Result;
         nextMode = Mode.None;
     }

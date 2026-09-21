@@ -13,6 +13,8 @@ public partial class GameSceneDirector
     GameObject iconDown2P;
     [SerializeField, Min(0f), Tooltip("形勢バーが新しい比率へ移動する秒数。0なら即時反映。")]
     float valenceBarAnimationSeconds = 0.4f;
+    [SerializeField, Range(0f, 0.5f), Tooltip("1P・2Pそれぞれに常に表示する最低割合。0.1なら両者ともバーの10%以上を表示します。")]
+    float minimumValenceBarFill = 0.05f;
     Tween valenceBarTween;
     float displayedFirstPlayerRatio = 0.5f;
 
@@ -53,6 +55,8 @@ public partial class GameSceneDirector
 
     void SetValenceBarRatio(float firstPlayerRatio, bool animate = false)
     {
+        float minimum = Mathf.Clamp(minimumValenceBarFill, 0f, 0.5f);
+        firstPlayerRatio = Mathf.Clamp(firstPlayerRatio, minimum, 1f - minimum);
         // 更新途中に次の局面が来たら、その時点の表示位置から新しい目標へ向かう。
         StopValenceBarTween();
         if (!animate || valenceBarAnimationSeconds <= 0f || !isActiveAndEnabled ||
@@ -72,6 +76,8 @@ public partial class GameSceneDirector
 
     void ApplyDisplayedValenceBarRatio(float firstPlayerRatio)
     {
+        float minimum = Mathf.Clamp(minimumValenceBarFill, 0f, 0.5f);
+        firstPlayerRatio = Mathf.Clamp(firstPlayerRatio, minimum, 1f - minimum);
         displayedFirstPlayerRatio = firstPlayerRatio;
         if (sliderFill1PValue) sliderFill1PValue.SetValueWithoutNotify(firstPlayerRatio);
         if (sliderFill2PValue) sliderFill2PValue.SetValueWithoutNotify(1f - firstPlayerRatio);

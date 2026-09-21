@@ -14,7 +14,7 @@ using KokoroShogi.Net;
 public partial class GameSceneDirector : MonoBehaviour
 {
     [SerializeField] PieceCameraAnimator pieceCameraAnimator;
-    [SerializeField, Min(0f), Tooltip("AIの着手を表示する前に待つ秒数。0で待機なし。")]
+    [SerializeField, Min(0f), Tooltip("AIの着手表示とランダム打ちの送信前に待つ秒数。0で待機なし。")]
     float aiMoveDelaySeconds = 1f;
     [SerializeField, Range(0, 1), Tooltip("AI側のプレイヤー番号。先手は0、後手は1。Python側の設定に合わせてください。")]
     int aiPlayer = 1;
@@ -48,6 +48,10 @@ public partial class GameSceneDirector : MonoBehaviour
     [SerializeField] Button buttonEvolutionCancel;
     [SerializeField, Tooltip("用意した投了ボタンのButtonコンポーネントを設定してください。")]
     UnityEngine.UI.Button buttonResign;
+    [SerializeField, Tooltip("Canvas_MainGameのランダム打ち切り替えボタンを設定してください。")]
+    UnityEngine.UI.Button buttonRandomMove;
+    bool randomPlayerMovesEnabled;
+    Coroutine pendingRandomMove;
     bool playerResignedCurrentGame;
 
     [Header("キャンバス切り替え")]
@@ -83,6 +87,8 @@ public partial class GameSceneDirector : MonoBehaviour
     {
         SetValenceBarRatio(0.5f);
         isWaitingForModeSelection = false;
+        CancelPendingRandomMove();
+        randomPlayerMovesEnabled = false;
         playerResignedCurrentGame = false;
         resultRecordedForCurrentGame = false;
         if (canvasResult) canvasResult.SetActive(false);
@@ -95,15 +101,18 @@ public partial class GameSceneDirector : MonoBehaviour
         ShowCanvasToggleButtons();
         if (toScoreBoard) toScoreBoard.onClick.AddListener(OnClickToScoreBoard);
         if (toModeSelection) toModeSelection.onClick.AddListener(OnClickToModeSelection);
+        if (buttonRandomMove) buttonRandomMove.onClick.AddListener(OnClickToggleRandomMove);
         if (canvasResult && canvasModeSelection && canvasResult.activeSelf && canvasModeSelection.activeSelf)
             canvasResult.SetActive(false);
     }
 
     void OnDisable()
     {
+        CancelPendingRandomMove();
         StopValenceBarTween();
         if (toScoreBoard) toScoreBoard.onClick.RemoveListener(OnClickToScoreBoard);
         if (toModeSelection) toModeSelection.onClick.RemoveListener(OnClickToModeSelection);
+        if (buttonRandomMove) buttonRandomMove.onClick.RemoveListener(OnClickToggleRandomMove);
     }
 
     public void OnClickToScoreBoard()
@@ -115,6 +124,42 @@ public partial class GameSceneDirector : MonoBehaviour
     public void OnClickToModeSelection()
     {
         ToggleCanvas(canvasModeSelection, canvasResult);
+    }
+
+    public void OnClickToggleRandomMove()
+    {
+        if (isWaitingForModeSelection || nowMode == Mode.Result) return;
+        randomPlayerMovesEnabled = !randomPlayerMovesEnabled;
+        if (!randomPlayerMovesEnabled) CancelPendingRandomMove();
+        if (randomPlayerMovesEnabled && nowMode == Mode.Select) setSelectCursors();
+        Debug.Log($"プレイヤーのランダム打ち: {(randomPlayerMovesEnabled ? "ON" : "OFF")}", this);
+    }
+
+    void ScheduleRandomMove()
+    {
+        if (pendingRandomMove != null) return;
+        if (aiMoveDelaySeconds <= 0f)
+        {
+            serverBoard.RequestRandomMove();
+            return;
+        }
+        pendingRandomMove = StartCoroutine(RequestRandomMoveAfterDelay(turnCount));
+    }
+
+    IEnumerator RequestRandomMoveAfterDelay(int scheduledPly)
+    {
+        yield return new WaitForSeconds(aiMoveDelaySeconds);
+        pendingRandomMove = null;
+        if (!randomPlayerMovesEnabled || isWaitingForModeSelection || nowMode != Mode.Select ||
+            nowPlayer == aiPlayer || turnCount != scheduledPly || !serverBoard.CanSelectMove) yield break;
+        serverBoard.RequestRandomMove();
+    }
+
+    void CancelPendingRandomMove()
+    {
+        if (pendingRandomMove == null) return;
+        StopCoroutine(pendingRandomMove);
+        pendingRandomMove = null;
     }
 
     void ToggleCanvas(GameObject target, GameObject other)
@@ -385,6 +430,8 @@ public partial class GameSceneDirector : MonoBehaviour
             {
                 // 最終局面の表示と合法手の受信が揃ってから、詰みを判定する。
                 if (serverBoard.HasNoLegalMoves) startMode();
+                else if (randomPlayerMovesEnabled && nowPlayer != aiPlayer)
+                    ScheduleRandomMove();
                 else selectMode();
             }
             if (nextMode != Mode.None) { nowMode = nextMode; nextMode = Mode.None; }
@@ -701,6 +748,8 @@ public partial class GameSceneDirector : MonoBehaviour
             SetEndGameButtonVisible(buttonRematch, true);
             SetEndGameButtonVisible(buttonTitle, true);
             if (buttonResign) buttonResign.gameObject.SetActive(false);
+            CancelPendingRandomMove();
+            randomPlayerMovesEnabled = false;
         }
 
     }
