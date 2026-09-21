@@ -217,3 +217,15 @@ READMEのバグです** (あなたのせいではありません)。
 - 効果音・BGM・フォント: `unity/KokoroShogi/Assets/_Project/Audio/LICENSES.md` に一覧 (U2管理)
 - テクスチャ素材: `unity/KokoroShogi/Assets/_Project/Textures/LICENSES_textures.md` に一覧 (B2管理)
 - 本体ライセンス: チームで決定後に記載 (公開するなら MIT 推奨)
+
+### Blender
+
+- [武蔵システム「衡山毛筆フォント」](https://opentype.jp/kouzanmouhitufont.htm)
+　- 駒のフォントに使用させていただきました。
+- - [ambientCG](https://ambientcg.com/)
+　- 部屋や小物のマテリアルに使用させていただきました。
+
+### Unity
+
+- [効果音ラボ 「将棋の駒を打つ」](https://soundeffect-lab.info/sound/search.php?s=%E9%A7%92)
+　- ゲーム内SEに使用させていただきました。

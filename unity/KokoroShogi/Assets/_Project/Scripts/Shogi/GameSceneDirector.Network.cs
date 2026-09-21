@@ -29,13 +29,19 @@ public partial class GameSceneDirector
     {
         // 接続直後に前回の終局情報が届いても、開始画面には表示しない。
         if (isWaitingForModeSelection) return;
+        if (playerResignedCurrentGame && result.reason != "resign") return;
         setSelectCursors();
         movableTiles.Clear();
         pendingMoveUnit = null;
         pendingPlayerMove = null;
         buttonEvolutionApply.gameObject.SetActive(false);
         buttonEvolutionCancel.gameObject.SetActive(false);
-        if (result.reason == "engine_no_move")
+        if (result.reason == "resign")
+        {
+            textResultInfo.text = "投了（あなたの負け）";
+            RecordFinishedGameResult(false, "投了");
+        }
+        else if (result.reason == "engine_no_move")
             textResultInfo.text = "AIの着手を取得できず対局終了";
         else if (result.winner == "draw")
             textResultInfo.text = "引き分け";
@@ -46,14 +52,15 @@ public partial class GameSceneDirector
             if (result.reason == "checkmate")
             {
                 textResultInfo.text += "（詰み）";
-                RecordCheckmateResult(winner == result.human);
+                RecordFinishedGameResult(winner == result.human, "詰み");
             }
         }
         textResultInfo.gameObject.SetActive(true);
         textResultInfo.enabled = true;
-        textTurnInfo.text = "";
+        ClearTurnInfo();
         SetEndGameButtonVisible(buttonRematch, true);
         SetEndGameButtonVisible(buttonTitle, true);
+        if (buttonResign) buttonResign.gameObject.SetActive(false);
         nowMode = Mode.Result;
         nextMode = Mode.None;
     }
@@ -100,9 +107,12 @@ public partial class GameSceneDirector
         }
 
         ApplySnapshotPieces(message.pieces);
+        // 初期配置・同じ局面の再送では鳴らさず、実際の着手反映で1回だけ鳴らす。
+        if (isNewMove && message.ply > 0) PlayMoveCompletedSound();
+        UpdateValenceBar(message.pieces);
         nowPlayer = snapshot.PlayerToMove;
         SetMoveCount(message.ply);
-        textTurnInfo.text = (nowPlayer + 1) + "Pの番です";
+        SetTurnInfo();
         textResultInfo.text = "";
         if (animate)
         {
@@ -170,6 +180,7 @@ public partial class GameSceneDirector
             {
                 unit.gameObject.SetActive(true);
                 unit.Init(piece.owner, (int)baseType, tiles[position], position);
+                ApplyCubeBaseColor(unit);
                 // 生駒から成りを適用することで、成り解除やリプレイの巻き戻しにも対応する。
                 if (inHand) unit.Capture(piece.owner);
                 else
@@ -178,6 +189,8 @@ public partial class GameSceneDirector
                     unit.GetComponent<Rigidbody>().isKinematic = false;
                 }
             }
+            // 移動していない駒も感情は変わるので、毎局面更新する。
+            unit.ApplyMood(piece.mood);
             if (inHand) captureUnits.Add(unit);
             else units[position.x, position.y] = unit;
         }

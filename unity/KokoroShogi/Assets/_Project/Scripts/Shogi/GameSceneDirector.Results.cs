@@ -11,6 +11,7 @@ public partial class GameSceneDirector
         public DateTime finishedAt;
         public int moveCount;
         public bool humanWon;
+        public string reason;
     }
 
     // 再戦時のシーン再読み込みでも保持する。アプリ終了後の保存は行わない。
@@ -60,7 +61,7 @@ public partial class GameSceneDirector
         RefreshResultHistory();
     }
 
-    void RecordCheckmateResult(bool humanWon)
+    void RecordFinishedGameResult(bool humanWon, string reason)
     {
         // 同じ終局通知が再送されても、1対局につき1行だけ追加する。
         if (resultRecordedForCurrentGame) return;
@@ -69,7 +70,8 @@ public partial class GameSceneDirector
         {
             finishedAt = DateTime.Now,
             moveCount = turnCount,
-            humanWon = humanWon
+            humanWon = humanWon,
+            reason = reason
         });
         RefreshResultHistory();
     }
@@ -112,7 +114,7 @@ public partial class GameSceneDirector
                     label.color = result.humanWon ? Color.red : Color.blue;
                 }
                 else if (label.name.EndsWith("_finNumber", StringComparison.Ordinal))
-                    label.text = result.moveCount + "手（詰み）";
+                    label.text = result.moveCount + "手（" + result.reason + "）";
             }
             // サンプルの文字が一瞬表示されないよう、値を設定してから表示する。
             row.gameObject.SetActive(true);

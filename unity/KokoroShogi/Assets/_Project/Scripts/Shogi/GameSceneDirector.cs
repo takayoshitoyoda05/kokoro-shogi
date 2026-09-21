@@ -18,12 +18,17 @@ public partial class GameSceneDirector : MonoBehaviour
     float aiMoveDelaySeconds = 1f;
     [SerializeField, Range(0, 1), Tooltip("AI側のプレイヤー番号。先手は0、後手は1。Python側の設定に合わせてください。")]
     int aiPlayer = 1;
+    [SerializeField, Tooltip("駒の移動完了時に鳴らすAudioSource。AudioClipに着手SEを設定し、Play On Awakeはオフにしてください。")]
+    AudioSource moveCompletedAudioSource;
     ServerBoardSynchronizer serverBoard;
 
     void Awake()
     {
         InitializeSelectionScreen();
+        InitializeResignButton();
         InitializeResultHistory();
+        InitializeValenceBar();
+        InitializeTurnOutline();
         if (!pieceCameraAnimator)
             pieceCameraAnimator = GetComponent<PieceCameraAnimator>();
         if (!pieceCameraAnimator)
@@ -41,6 +46,9 @@ public partial class GameSceneDirector : MonoBehaviour
     [SerializeField] Button buttonRematch;
     [SerializeField] Button buttonEvolutionApply;
     [SerializeField] Button buttonEvolutionCancel;
+    [SerializeField, Tooltip("用意した投了ボタンのButtonコンポーネントを設定してください。")]
+    UnityEngine.UI.Button buttonResign;
+    bool playerResignedCurrentGame;
 
     [Header("キャンバス切り替え")]
     [SerializeField] UnityEngine.UI.Button toScoreBoard;
@@ -55,6 +63,7 @@ public partial class GameSceneDirector : MonoBehaviour
         if (canvasResult) canvasResult.SetActive(false);
         if (canvasModeSelection) canvasModeSelection.SetActive(true);
         HideEndGameControls();
+        if (buttonResign) buttonResign.gameObject.SetActive(false);
     }
 
     void HideEndGameControls()
@@ -72,10 +81,13 @@ public partial class GameSceneDirector : MonoBehaviour
 
     public void BeginSelectedGame()
     {
+        SetValenceBarRatio(0.5f);
         isWaitingForModeSelection = false;
+        playerResignedCurrentGame = false;
         resultRecordedForCurrentGame = false;
         if (canvasResult) canvasResult.SetActive(false);
         HideEndGameControls();
+        if (buttonResign) buttonResign.gameObject.SetActive(true);
     }
 
     void OnEnable()
@@ -89,6 +101,7 @@ public partial class GameSceneDirector : MonoBehaviour
 
     void OnDisable()
     {
+        StopValenceBarTween();
         if (toScoreBoard) toScoreBoard.onClick.RemoveListener(OnClickToScoreBoard);
         if (toModeSelection) toModeSelection.onClick.RemoveListener(OnClickToModeSelection);
     }
@@ -128,6 +141,29 @@ public partial class GameSceneDirector : MonoBehaviour
         button.gameObject.SetActive(isCanvasToggle || visible);
     }
 
+    void InitializeResignButton()
+    {
+        if (!buttonResign) return;
+        buttonResign.onClick.AddListener(OnClickResign);
+        buttonResign.gameObject.SetActive(false);
+    }
+
+    public void OnClickResign()
+    {
+        if (isWaitingForModeSelection || nowMode == Mode.Result || resultRecordedForCurrentGame) return;
+        playerResignedCurrentGame = true;
+        if (serverBoard) serverBoard.PrepareForResignation();
+        ShowServerResult(new GameResult
+        {
+            winner = aiPlayer == 0 ? "black" : "white",
+            human = GetNextPlayer(aiPlayer),
+            reason = "resign"
+        });
+        UnityWebSocketClient client = UnityWebSocketClient.Instance;
+        if (client && client.IsConnected) client.SendGameControl("resign");
+        else Debug.LogWarning("投了結果はUnity内に記録しましたが、Pythonサーバーに送信できませんでした。", this);
+    }
+
     //ゲーム設定
     const int PlayerMax = 2;
     int boardWidth;
@@ -138,6 +174,15 @@ public partial class GameSceneDirector : MonoBehaviour
 
     //ユニットのプレハブ
     [SerializeField] List<GameObject> prefabUnits;
+
+    [Header("駒のCubeのBase Map色")]
+    [SerializeField, Tooltip("オンにすると、Cubeの元のマテリアルを維持したまま陣営別のBase Map色を適用します。")]
+    bool overrideCubeBaseColors;
+    [SerializeField, Tooltip("プレイヤー側のCubeに適用するBase Map色。")]
+    Color playerCubeBaseColor = Color.white;
+    [SerializeField, Tooltip("AI側のCubeに適用するBase Map色。")]
+    Color aiCubeBaseColor = Color.white;
+    static readonly int CubeBaseColorProperty = Shader.PropertyToID("_BaseColor");
 
     //初期配置
     int[,] boardSetting =
@@ -278,6 +323,7 @@ public partial class GameSceneDirector : MonoBehaviour
 
                 UnitController unitctrl = unit.AddComponent<UnitController>();
                 unitctrl.Init(player, type, tile, tileindex);
+                ApplyCubeBaseColor(unitctrl);
 
                 //ユニットデータセット
                 units[i, j] = unitctrl;
@@ -517,7 +563,16 @@ public partial class GameSceneDirector : MonoBehaviour
         if (promote) unit.Evolution();
         alignCaptureUnits(nowPlayer);
         SetMoveCount(turnCount + 1);
+        PlayMoveCompletedSound();
         SendPendingPlayerMove(promote);
+    }
+
+    void PlayMoveCompletedSound()
+    {
+        // 未設定でも対局は継続する。音量・出力先などは割り当てたAudioSourceの設定を使う。
+        if (!moveCompletedAudioSource || !moveCompletedAudioSource.isActiveAndEnabled ||
+            !moveCompletedAudioSource.clip) return;
+        moveCompletedAudioSource.PlayOneShot(moveCompletedAudioSource.clip);
     }
 
     void SetMoveCount(int ply)
@@ -603,7 +658,7 @@ public partial class GameSceneDirector : MonoBehaviour
         nextMode = Mode.Select;
 
         //Info更新
-        textTurnInfo.text = "" + (nowPlayer + 1) + "Pの番です";
+        SetTurnInfo();
         textResultInfo.text = "";
 
         //勝敗チェック
@@ -632,7 +687,7 @@ public partial class GameSceneDirector : MonoBehaviour
                 int winner = GetNextPlayer(nowPlayer);
                 textResultInfo.text = winner == aiPlayer ? "AIの勝ち（詰み）" : "人間の勝ち（詰み）";
                 // 通信対局の勝敗・人間側は、確定したcareer.resultを使う。
-                if (!serverBoard.HasServerState) RecordCheckmateResult(winner != aiPlayer);
+                if (!serverBoard.HasServerState) RecordFinishedGameResult(winner != aiPlayer, "詰み");
             }
             nextMode = Mode.Result;
         }
@@ -642,9 +697,10 @@ public partial class GameSceneDirector : MonoBehaviour
         {
             textResultInfo.gameObject.SetActive(true);
             textResultInfo.enabled = true;
-            textTurnInfo.text = "";
+            ClearTurnInfo();
             SetEndGameButtonVisible(buttonRematch, true);
             SetEndGameButtonVisible(buttonTitle, true);
+            if (buttonResign) buttonResign.gameObject.SetActive(false);
         }
 
     }
@@ -740,8 +796,31 @@ public partial class GameSceneDirector : MonoBehaviour
         UnitController unit = units[tileindex.x, tileindex.y];
         if (!unit) return;
         unit.Capture(player);
+        ApplyCubeBaseColor(unit);
         captureUnits.Add(unit);
         units[tileindex.x, tileindex.y] = null;
+    }
+
+    void ApplyCubeBaseColor(UnitController unit)
+    {
+        if (!overrideCubeBaseColors) return;
+        Color color = unit.Player == aiPlayer ? aiCubeBaseColor : playerCubeBaseColor;
+
+        // 各マテリアルのBase Map色だけを駒単位で変え、共有アセットには触れない。
+        var properties = new MaterialPropertyBlock();
+        foreach (MeshRenderer renderer in unit.GetComponentsInChildren<MeshRenderer>(true))
+        {
+            if (renderer.gameObject.name != "Cube") continue;
+            Material[] materials = renderer.sharedMaterials;
+            for (int index = 0; index < materials.Length; index++)
+            {
+                if (!materials[index] || !materials[index].HasProperty(CubeBaseColorProperty)) continue;
+                properties.Clear();
+                renderer.GetPropertyBlock(properties, index);
+                properties.SetColor(CubeBaseColorProperty, color);
+                renderer.SetPropertyBlock(properties, index);
+            }
+        }
     }
 
     //持ち駒を並べる

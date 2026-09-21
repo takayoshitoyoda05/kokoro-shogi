@@ -14,6 +14,7 @@ public sealed class ServerBoardSynchronizer : MonoBehaviour
     LegalMovesMessage legalMoves;
     GameResult pendingResult;
     bool gameFinished;
+    bool resigning;
     bool applying;
     public bool HasServerState { get; private set; }
     public bool HasNoLegalMoves => legalMoves != null && legalMoves.moves != null && legalMoves.moves.Count == 0;
@@ -42,9 +43,24 @@ public sealed class ServerBoardSynchronizer : MonoBehaviour
         legalMoves = null;
         pendingResult = null;
         gameFinished = false;
+        resigning = false;
+    }
+    public void PrepareForResignation()
+    {
+        // 未表示の局面や演出が投了結果を上書きしないようにする。
+        bool wasApplying = applying;
+        StopAllCoroutines();
+        if (wasApplying && director) director.CancelServerStateApplication();
+        applying = false;
+        pendingStates.Clear();
+        pendingResult = null;
+        legalMoves = null;
+        gameFinished = true;
+        resigning = true;
     }
     void ReceiveState(StateUpdate message)
     {
+        if (resigning && message.ply != 0) return;
         try
         {
             var snapshot = new ReceivedBoardSnapshot(message);
@@ -53,6 +69,7 @@ public sealed class ServerBoardSynchronizer : MonoBehaviour
             {
                 pendingResult = null;
                 gameFinished = false;
+                resigning = false;
             }
             pendingStates.Enqueue(snapshot);
             HasServerState = true;
@@ -84,6 +101,7 @@ public sealed class ServerBoardSynchronizer : MonoBehaviour
         pendingStates.Clear();
         pendingResult = null;
         gameFinished = false;
+        resigning = false;
     }
     void Update()
     {

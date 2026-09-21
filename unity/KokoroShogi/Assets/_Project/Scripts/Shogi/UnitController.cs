@@ -30,7 +30,7 @@ public enum FieldStatus
     Captured,
 }
 
-public class UnitController : MonoBehaviour
+public partial class UnitController : MonoBehaviour
 {
     // Pythonの恒久ID。移動・成り・獲得でも同じ駒として追跡する。
     public string PieceId { get; internal set; }
@@ -64,16 +64,9 @@ public class UnitController : MonoBehaviour
     //選択される前のy座標
     float oldPosY;
 
-    // Start is called once before the first execution of Update after the MonoBehaviour is created
-    void Start()
+    void Awake()
     {
-
-    }
-
-    // Update is called once per frame
-    void Update()
-    {
-
+        ApplyMood(null);
     }
 
     //初期設定
