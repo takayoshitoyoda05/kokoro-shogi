@@ -27,13 +27,21 @@ public partial class GameSceneDirector
 
     public void ShowServerResult(GameResult result)
     {
+        // 接続直後に前回の終局情報が届いても、開始画面には表示しない。
+        if (isWaitingForModeSelection) return;
+        if (playerResignedCurrentGame && result.reason != "resign") return;
         setSelectCursors();
         movableTiles.Clear();
         pendingMoveUnit = null;
         pendingPlayerMove = null;
         buttonEvolutionApply.gameObject.SetActive(false);
         buttonEvolutionCancel.gameObject.SetActive(false);
-        if (result.reason == "engine_no_move")
+        if (result.reason == "resign")
+        {
+            textResultInfo.text = "投了（あなたの負け）";
+            RecordFinishedGameResult(false, "投了");
+        }
+        else if (result.reason == "engine_no_move")
             textResultInfo.text = "AIの着手を取得できず対局終了";
         else if (result.winner == "draw")
             textResultInfo.text = "引き分け";
@@ -41,12 +49,18 @@ public partial class GameSceneDirector
         {
             int winner = result.winner == "black" ? 0 : 1;
             textResultInfo.text = winner == result.human ? "人間の勝ち" : "AIの勝ち";
+            if (result.reason == "checkmate")
+            {
+                textResultInfo.text += "（詰み）";
+                RecordFinishedGameResult(winner == result.human, "詰み");
+            }
         }
         textResultInfo.gameObject.SetActive(true);
         textResultInfo.enabled = true;
-        textTurnInfo.text = "";
-        buttonRematch.gameObject.SetActive(true);
-        buttonTitle.gameObject.SetActive(true);
+        ClearTurnInfo();
+        SetEndGameButtonVisible(buttonRematch, true);
+        SetEndGameButtonVisible(buttonTitle, true);
+        if (buttonResign) buttonResign.gameObject.SetActive(false);
         nowMode = Mode.Result;
         nextMode = Mode.None;
     }
@@ -54,16 +68,19 @@ public partial class GameSceneDirector
     public IEnumerator ApplyServerState(ReceivedBoardSnapshot snapshot)
     {
         StateUpdate message = snapshot.Message;
-        buttonRematch.gameObject.SetActive(false);
-        buttonTitle.gameObject.SetActive(false);
+        if (message.ply == 0) resultRecordedForCurrentGame = false;
+        // 結果表示はPythonのcareer.resultを受信し、最終局面の演出が終わってから行う。
+        textResultInfo.gameObject.SetActive(false);
+        SetEndGameButtonVisible(buttonRematch, false);
+        SetEndGameButtonVisible(buttonTitle, false);
         setSelectCursors();
         movableTiles.Clear();
         pendingMoveUnit = null;
         pendingPlayerMove = null;
         buttonEvolutionApply.gameObject.SetActive(false);
         buttonEvolutionCancel.gameObject.SetActive(false);
-        buttonTitle.gameObject.SetActive(false);
-        buttonRematch.gameObject.SetActive(false);
+        SetEndGameButtonVisible(buttonTitle, false);
+        SetEndGameButtonVisible(buttonRematch, false);
         nowMode = Mode.Animating;
         nextMode = Mode.None;
 
@@ -90,9 +107,12 @@ public partial class GameSceneDirector
         }
 
         ApplySnapshotPieces(message.pieces);
+        // 初期配置・同じ局面の再送では鳴らさず、実際の着手反映で1回だけ鳴らす。
+        if (isNewMove && message.ply > 0) PlayMoveCompletedSound();
+        UpdateValenceBar(message.pieces);
         nowPlayer = snapshot.PlayerToMove;
         SetMoveCount(message.ply);
-        textTurnInfo.text = (nowPlayer + 1) + "Pの番です";
+        SetTurnInfo();
         textResultInfo.text = "";
         if (animate)
         {
@@ -160,6 +180,7 @@ public partial class GameSceneDirector
             {
                 unit.gameObject.SetActive(true);
                 unit.Init(piece.owner, (int)baseType, tiles[position], position);
+                ApplyCubeBaseColor(unit);
                 // 生駒から成りを適用することで、成り解除やリプレイの巻き戻しにも対応する。
                 if (inHand) unit.Capture(piece.owner);
                 else
@@ -168,6 +189,8 @@ public partial class GameSceneDirector
                     unit.GetComponent<Rigidbody>().isKinematic = false;
                 }
             }
+            // 移動していない駒も感情は変わるので、毎局面更新する。
+            unit.ApplyMood(piece.mood);
             if (inHand) captureUnits.Add(unit);
             else units[position.x, position.y] = unit;
         }

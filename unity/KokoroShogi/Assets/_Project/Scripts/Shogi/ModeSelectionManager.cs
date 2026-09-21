@@ -77,6 +77,8 @@ public class ModeSelectionManager : MonoBehaviour
 
     void SelectMode()
     {
+        GameSceneDirector director = FindFirstObjectByType<GameSceneDirector>();
+        if (director) director.BeginSelectedGame();
         UnityWebSocketClient webSocketClient = UnityWebSocketClient.Instance;
 
         if (webSocketClient)

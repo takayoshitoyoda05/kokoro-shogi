@@ -68,6 +68,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: "\u738B\u5C062"
       objectReference: {fileID: 0}
+    - target: {fileID: 3654934372253022927, guid: 0fd3a99150854d84f96fa77f6f0f1395, type: 3}
+      propertyPath: m_Name
+      value: Cube
+      objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
