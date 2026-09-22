@@ -1,232 +1,218 @@
 # Kokoro-Shogi (こころ将棋)
 
-**駒が心を持つ将棋AI** — 各駒が性格・感情・関係性を持ち、議論して一手を決め、
-その内面をUnityの3D盤面で観戦できるプロジェクト。
+**駒が心を持つ将棋 AI** — 盤面ではなく 40 枚の駒それぞれをエージェントとして扱い、
+駒の欲求・性格・感情から一手を決め、その内面を Unity の 3D 盤面で観戦できます。
 
 > 歩が怯えて青ざめ、金と玉が絆の光で結ばれ、駒たちの会議が吹き出しで交わされ、
-> AIの実況が流れる。それでいて、中身は本気で強さを目指した深層学習将棋エンジン。
+> AI の実況が流れる。
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](./pyproject.toml)
 
 ---
 
-## はじめての人へ (3ステップ)
+## 何が普通の将棋 AI と違うのか
 
-1. この README を最後まで読む (5分)
-2. [`TEAM_PLAN.md`](./TEAM_PLAN.md) で全体の流れと自分の役割を確認する
-3. `docs/plans/` の**自分の計画書**を開く — 週1のタスクと環境構築手順が
-   全部書いてある。困ったらまず自分の計画書の「困ったときは」節へ
+従来の将棋 AI は盤面全体をひとつの評価関数で見ます。Kokoro-Shogi は
+**駒 40 枚をそれぞれ 1 人の登場人物として扱います**。
 
-## これは何?
+- 各駒が **欲求 6 軸**（生存・攻撃・成り・守備・前進・再登場）を持つ
+- 駒種ごとの **性格** が、どの欲求を重視するかを決める
+- 対局中の出来事で **感情** が動く（仲間が近くで取られると強く動揺する）
+- 駒どうしが **絆** を育てる（長く守り合った金と玉）
+- 一手は駒たちの **会議**（主張の競り合い）で決まり、議事録が残る
+- 取られた駒は消えず、**相手の駒として転生**して盤に戻る
 
-従来の将棋AI (AlphaZero系) は盤面全体を1つの評価関数で見ます。
-Kokoro-Shogiは発想を変え、**盤上の40枚の駒それぞれをエージェントとして扱います**。
+指し手は「どの駒が、どこへ」という形で出力され、**40 駒 × 81 マス × 成り = 6,480 通りを
+まとめて 1 つの softmax** にかけます。駒ごとに正規化しないので、「ある駒の主張が強くなれば
+別の駒の確率が下がる」という競合が、そのまま 1 つの微分可能な式になります。
 
-- 各駒は **欲求** (生存・攻撃・成り・守備…) と **性格** (どの欲求を重視するか) を持つ
-- 各駒は対局中の出来事で変化する **感情** を持つ (仲間が取られると怯える)
-- 駒同士は **関係性** を築く (何局も共闘した金と玉の絆)
-- 一手は駒たちの **会議** (bid合戦) で決まり、その議事録がLLMで実況される
-- 取られた駒は相手の持ち駒として **転生** する — 将棋にしかない、エージェントの
-  所有権が敵に移る現象
-- 対局を重ねると駒に **キャリア** (生存率・MVP) が蓄積し、優秀な駒の性格は
-  **血統** として次世代に受け継がれる
+**推論時に先読み（木探索）を一切しません。** 局面を 1 回計算して 1 手を返します。
 
-これらの「内面」はすべて補助構造として設計されており、**外しても強い将棋AIが
-残る**よう、強さの経路 (Transformer + 蒸留 + 自己対戦RL) と分離されています。
+これらの「内面」はすべて**零初期化された足し算**として組み込まれているので、機能フラグを
+切ると素の駒トークン Transformer と数値的に完全に一致します。
 
-## 技術ハイライト
+---
 
-> この表はAI側の技術要約です (対外説明・発表用)。Unity/Blender担当は
-> 読み飛ばしてOK — 作業に必要な知識は各自の計画書にすべて書いてあります。
+## どのくらい強いのか
 
-| 領域 | 中身 |
-|---|---|
-| アーキテクチャ | 駒トークン化Transformer (Chessformer/Leela流) + 利き関係attentionバイアス |
-| 方策 | 手スコア = ⟨性格, 欲求⟩ + 自由項 → 全駒softmax (微分可能な「調停」) |
-| 学習 | floodgate棋譜からの蒸留 → MAPPO / Gumbel AlphaZero自己対戦RL |
-| 功績配分 | QMIX流の単調mixing + COMA反実仮想advantageで勝敗を駒ごとに分解 |
-| 解釈可能性 | 「棋力 vs 欲求説明率」をλ_g掃引で定量化。\|自由項\|が捨て駒検出器になる |
-| 進化 | 個体性格の永続化・血統 (進化戦略)・文化リーグ (PBT) |
-| 実況 | 会議ログ → ローカルLLM (Ollama + Qwen2.5 7B) で自然言語実況。コストゼロ |
-| 可視化 | Unity (URP): 感情シェーダ・関係線VFX・会議吹き出し・リプレイ/ライブ観戦/対局 |
+正直に書きます。**やねうら王 + Háo（NNUE）を探索 1 手に制限した相手に、最も強いモデルで
+勝率 0.230** です（floodgate の序盤 500 種から 100 局、先後各 50、SE ≈ 0.04）。
+アマチュアの将棋 AI としては弱い部類で、市販ソフトには遠く及びません。
+なお同梱しているのは文化リーグのモデル（0.10 〜 0.16）で、0.230 を出した蒸留 + PPO のモデルは
+サイズの都合で同梱していません。
 
-新規性の核は (1) ターン制完全情報ゲームでの駒粒度マルチエージェント学習、
-(2) 持ち駒 = エージェント転生問題、(3) 解釈可能性と棋力のトレードオフの構造化。
-詳細は [`DESIGN.md`](./DESIGN.md) を参照。
+2026 年 9 月に初めて外部エンジンを基準にして測り直したところ、**それまで「効いている」と
+思っていた施策のほとんどが、外では効いていませんでした**。
 
-## システム構成
+| 施策 | 動かしたパラメータ | 外部勝率の変化 |
+|---|---:|---:|
+| 棋譜からの蒸留（3 エポック） | 全体 | **0.220**（ここが土台） |
+| 自己対戦 PPO 9,200 反復 | 全体 | +0.01 |
+| 文化リーグ（性格の進化） | 224 | −0.07 〜 −0.13 |
+| 感情 GRU を学習で動かす | 4,128 | **−0.18**（用量依存） |
+| エンジン教師蒸留 20,000 局 | 全体 | ±0（p = 0.84） |
+| 蒸留 4 エポック目 | 全体 | ±0（p = 0.88） |
 
-```
-┌────── src/kokoro_shogi (Python) ──────────┐   ┌── unity/KokoroShogi (C#) ───┐
-│                                            │   │                              │
-│  学習パイプライン                           │   │  3D盤面・駒モデル             │
-│   蒸留 → 自己対戦RL → 進化リーグ            │   │  感情シェーダ・関係線VFX      │
-│           │                                │   │  会議吹き出し・実況字幕       │
-│           ▼                                │   │  リプレイ/ライブ/対局モード   │
-│  推論エンジン ──► JSONLログ ────────────────┼──►│  (JSONLリプレイ再生)         │
-│           │                                │   │                              │
-│           └────► WebSocketサーバ ◄─────────┼──►│  (リアルタイム観戦・対局)     │
-│                                            │   │                              │
-│  ローカルLLM実況 (Ollama)                   │   │                              │
-└────────────────────────────────────────────┘   └──────────────────────────────┘
-                     両者の契約 = docs/INTERFACE.md (JSONスキーマ)
-```
+パラメータ 500 万個のうち **95% が共有 Transformer、「こころ」の部分は 0.09%** しかありません。
+内面をいじっても強さが動かないのは、この比率を見れば当然でした。
 
-AI側とUnity側は **JSONログとWebSocketでしか会話しない** 疎結合設計。
-片方の遅延がもう片方を止めません。同様に、BlenderとUnityは
-**FBXと命名契約 (naming.md) でしか会話しない**。
+現在の律速は**データ量**と診断しています（学習データの一致率 47.3% に対し検証データ 41.5%、
+その差がエポックごとに拡大＝過学習）。測定方法・失敗した施策・次の方針を含めた全記録は
+**[技術報告](./docs/TECHNICAL_REPORT.md)** にあります（機械学習の予備知識がなくても読める形で
+書いてあります）。
 
-## リポジトリ
+---
 
-**モノレポ1つ** (`kokoro-shogi`): Python (A管理)・Unity (unity/ 配下, U1管理)・
-Blender素材 (blender/, B1/B2管理) が同居。
-構成の詳細・ブランチ運用・Git LFS: [`docs/REPO_STRUCTURE.md`](./docs/REPO_STRUCTURE.md)
+## 動かしてみる
 
-## ドキュメント一覧
+Python 3.12 と [uv](https://docs.astral.sh/uv/) が必要です。
 
-| 文書 | 内容 | 対象 |
-|---|---|---|
-| [`DESIGN.md`](./DESIGN.md) | AIアルゴリズム設計書 v2 (数式仕様・出典・学習フロー) | A |
-| [`TEAM_PLAN.md`](./TEAM_PLAN.md) | チーム全体計画 (v4: 役割・10週マイルストーン・運用ルール) | 全員 |
-| [`docs/TECHNICAL_REPORT.md`](./docs/TECHNICAL_REPORT.md) | 技術報告 (表現・アーキテクチャ・学習・推論・評価と、効かなかった施策の実測) | A |
-| [`docs/INTERFACE.md`](./docs/INTERFACE.md) | データ契約の正本 (JSONスキーマ, バージョン管理) | 全員 |
-| [`docs/REPO_STRUCTURE.md`](./docs/REPO_STRUCTURE.md) | リポジトリ構成 (フォルダの意味・置いてよいもの・担当区分) | 全員 |
-| [`docs/GIT_GUIDE.md`](./docs/GIT_GUIDE.md) | Gitの操作手順 (初学者向け: 環境構築・毎日の手順・トラブル対処) | 全員 |
-| [`docs/plans/PLAN_A_algorithm.md`](./docs/plans/PLAN_A_algorithm.md) | 個人計画書: AIアルゴリズム | Taka |
-| [`docs/plans/PLAN_U1_lead_network.md`](./docs/plans/PLAN_U1_lead_network.md) | 個人計画書: Unity-Python連携 (初学者向け) | U1 |
-| [`docs/plans/PLAN_U2_unity_main.md`](./docs/plans/PLAN_U2_unity_main.md) | 個人計画書: Unity本体 (初学者向け) | U2 |
-| [`docs/plans/PLAN_B1_blender_pieces.md`](./docs/plans/PLAN_B1_blender_pieces.md) | 個人計画書: Blender 駒 (初学者向け) | B1 |
-| [`docs/plans/PLAN_B2_blender_stage.md`](./docs/plans/PLAN_B2_blender_stage.md) | 個人計画書: Blender 舞台 (初学者向け) | B2 |
-
-## チーム
-
-| 役割 | 担当 | 一言 |
-|---|---|---|
-| A: AIアルゴリズム | Taka | AIエンジン全体・スキーマ策定・データ納品 |
-| U1: Unity-Python連携 | メンバー1 | リプレイ/WebSocket・盤面ロジック・進行役 |
-| U2: Unity本体 | メンバー2 | シーン・演出 (シェーダ/VFX/アニメ)・UI・音 = 画面のすべて |
-| B1: Blender (駒) | メンバー3 | 感情の仕掛けを埋め込んだ駒14種 |
-| B2: Blender (舞台) | メンバー4 | 盤・駒台・環境・ライティング素材 = 世界のすべて |
-
-## ロードマップ (10週・全機能 + 継続)
-
-```
-週 1     キックオフ: スキーマ策定・サンプルJSONL納品・アート方向性決定
-週 2-3   AI: 前処理→蒸留 ┃ Unity: リプレイヤー ┃ Blender: 先行駒・盤
-週 4     ★統合点①: サンプルログがUnityで完全再生
-週 5-6   AI: 感情/関係→会議+LLM実況→実データ納品 ┃ Unity: WebSocket・VFX
-週 7     ★統合点②: ライブ観戦 ┃ AI: 功績配分・キャリア・SQLite
-週 8     AI: 自己対戦RL+忠誠 (5五将棋) ┃ Unity: 人間対局モード・キャリアUI着手
-週 9     AI: 文化リーグ (5五将棋) ┃ Unity: キャリアUI完成・最適化
-週 10    ★統合点③: フルデモ → デモ動画・発表資料
-以降     RL/リーグ/血統の本将棋フルスケール化・floodgate参戦 (AI側継続)
-```
-
-重い機能 (RL・文化リーグ・忠誠実験) は10週内は **5五将棋 + 小型モデル** で
-「動く・兆候が見える」まで実証し、本将棋フルスケールは継続タスクとする戦略。
-
-## セットアップ
-
-### 全員共通 (最初に1回)
 ```bash
-git lfs install              # ★cloneより先に必ず1回 (忘れると3Dモデルが開けない)
-git clone <this-repo>
-```
-
-### AI側 (担当: A)
-```bash
-# uv未導入なら: https://docs.astral.sh/uv/ (Windows: winget install astral-sh.uv)
+git clone https://github.com/takayoshitoyoda05/kokoro-shogi.git
 cd kokoro-shogi
-uv sync                      # Python 3.12 + 依存一式
-uv run pytest                # ※初期リポジトリは全テストskipでグリーンになれば正常
-                             #   (テストは各Phaseの実装と同時に有効化していく)
+uv sync --group train        # PyTorch を含む依存一式
 ```
 
-#### 学習済みモデル (対局サーバで使うモデルの選び方)
-対局サーバが読むモデルは通常 `checkpoints/` ごと Git 管理外ですが、**共有用の 2 つだけは
-リポジトリに入っています**。clone すればそのまま対局できます。
+学習済みモデルが 2 つ同梱されているので、**clone すればすぐ対局できます**。
 
-| ファイル | 中身 | 既定 |
-|---|---|---|
-| `checkpoints/league_E2b_grace/league.pt` | **デモはこちら**。ppo2 相手に文化平均 0.633 で最も強い | ○ |
-| `checkpoints/league_E7_ema/league.pt` | 最新 (2026-09-12)。適応度 EMA の実験条件で、強さは 0.540 | |
+### まず動くか確かめる（Unity 不要・数十秒）
 
-**起動 (Python を先に。Unity 側から Python は起動できません)**
 ```bash
-uv sync --group train                                  # torch が要る (既定の sync からは外してある)
-uv run python scripts/play_server.py --host 0.0.0.0    # 引数なし = E2b の保存時の文化 (culture4)
+uv run python scripts/play_server.py --selfcheck
 ```
-起動直後の 1 行目で何が載ったかを確認してください:
-```
-checkpoint: league.pt / culture: culture4 (保存時のまま。--culture で選べるのは culture0, ...) / device: cpu / tau: 0.1 / mood: 感情GRU / relations: r_ij状態 / council: ON
-```
-`mood: 感情GRU / relations: r_ij状態 / council: ON` の 3 つが出ていれば正常です。
-その後 Unity を Play → モード選択ボタンで対局開始 (`docs/INTERFACE.md` §4)。
 
-**モデルを差し替える (`--checkpoint`)**
+乱択相手に 1 局を終局まで指します。起動直後の 1 行目に、どのモデルと機能が載ったかが出ます。
+
+```
+checkpoint: league.pt / culture: culture1 / device: cpu / tau: 0.0 / mood: 感情GRU / relations: r_ij状態 / council: ON
+  ply   2 eval +0.053  2ラウンドの議論で形勢が動いた。当初は△玉の主張が通りかけたが、最後は△歩が8c8dを押し切った。
+  ...
+selfcheck: 42 手で終局 (人間の手 21 回, 0.9s, 0.02s/手) / career 40 駒 / MVP B22_gen0_0006
+```
+
+末尾 3 つが `感情GRU` / `r_ij状態` / `ON` になっていれば内面つきで動いています。
+`ply` の行に出ているのは、**その手を決めた会議の実況**です。
+
+### Unity の 3D 盤面で観戦・対局する
+
+Python を先に起動してから Unity を Play してください（逆順では繋がりません）。
+
 ```bash
-uv run python scripts/play_server.py --host 0.0.0.0 --checkpoint checkpoints/league_E7_ema/league.pt
+uv run python scripts/play_server.py --host 0.0.0.0
 ```
 
-**文化 (棋風) を差し替える (`--culture`)**
-`league.pt` は 1 つの共有ネットワークと 6 つの「文化」(駒の性格パラメータ θ_sp) を持っていて、
-どの文化で指すかを選べます。省略時は保存時に載っていた文化 (E2b では culture4) で、
-これは学習ループの順番で最後に評価された個体にすぎず、最強という意味ではありません。
+1 手ごとに、40 駒それぞれの感情・欲求・発言力・絆、会議の議事録、自然言語の実況が
+WebSocket で流れます。データ形式の仕様は [`docs/INTERFACE.md`](./docs/INTERFACE.md) です。
+
+Unity プロジェクトは `unity/KokoroShogi/`（Unity 6000.3.8f1）にあります。
+
+---
+
+## 同梱モデルと「文化」
+
+| ファイル | 中身 | 対 Háo depth1 |
+|---|---|---:|
+| `checkpoints/league_E2b_grace/league.pt`（既定） | 文化リーグ（猶予つき淘汰） | 0.10 〜 0.13 |
+| `checkpoints/league_E7_ema/league.pt` | 文化リーグ（適応度 EMA）。**同梱 2 つでは強い方** | 0.16 |
+
 ```bash
-uv run python scripts/play_server.py --host 0.0.0.0 --culture culture1
-uv run python scripts/play_server.py --host 0.0.0.0 --checkpoint checkpoints/league_E7_ema/league.pt --culture culture2
+uv run python scripts/play_server.py --checkpoint checkpoints/league_E7_ema/league.pt
 ```
-E2b の各文化の強さ (ppo2 相手の勝率, 60 局):
 
-| culture0 | **culture1** | culture2 | culture3 | culture4 (既定) | culture5 |
-|---|---|---|---|---|---|
-| 0.525 | **0.692** | 0.608 | 0.683 | 0.617 | 0.675 |
+`league.pt` は**ひとつの共有ネットワークと 6 つの「文化」**（駒種の性格パラメータ）を持っていて、
+どの文化で指すかを選べます。同じ盤面でも、生存を重んじる文化と攻撃を重んじる文化では違う手を指します。
 
-存在しない名前を渡すと選べる一覧を出して止まります。`ppo2.pt` など文化を持たない
-チェックポイントでは `culture: -` と出て、`--culture` は使えません。
-
-**切り替えの手順**: 対局中や Unity 側から切り替える口はありません。
-Python を Ctrl+C で止める → 引数を変えて起動し直す → Unity を Play し直す (接続は `Start()` で
-1 回しか走らないので、Play 中のままだと繋ぎ直しません)。同じサーバに繋いだ人は全員同じ文化で
-指します。人ごとに変えたい場合は `--port` を変えて別プロセスを立てます。
-
-**その他の引数**: `--human white` (人間が後手) / `--tau 0` (AI を argmax に) / `--device cuda` /
-`--selfcheck` (Unity なしで乱択相手に 1 局回す。Python 側だけの疎通確認に使う)。
-
-**モデルを更新する場合**: 2 つは追跡済みなので上書きして `git add` するだけで置き換わります。
-ただし 1 回ごとに履歴へ 20MB 積まれるので、頻繁に更新する運用にはしないこと。3 つ目を足すときは
-`git add -f` が要ります (未追跡の `*.pt` は ignore 対象)。この表にも 1 行足してください。
-
-### Unity側 (担当: U1/U2)
+```bash
+uv run python scripts/play_server.py --culture culture2
 ```
-Unity Hub → Installs → 6000.3.8f1 (LTS) を追加 (バージョン固定・他は使わない)
-Unity Hub → unity/KokoroShogi/ を開く
+
+> **注意**: 文化リーグは自分の過去のモデルとの対戦では強くなったように見えましたが、
+> 外部エンジンを基準にすると蒸留だけのモデルより弱くなりました（0.220 → 0.10 〜 0.13）。
+> **自己対戦の勝率は、自分の系列の中でしか意味を持ちません。**
+> このため強さの判定は外部エンジンでのみ行っています
+> （[技術報告 §9.1〜9.2](./docs/TECHNICAL_REPORT.md)）。
+
+その他の主な引数: `--checkpoint`（モデル差し替え）/ `--human white`（人間が後手）/
+`--tau 0.1`（手を揺らす。0 なら常に最善手）/ `--device cuda` / `--port` / `--max-plies`。
+
+---
+
+## 自分で学習させる
+
+学習データは [floodgate](http://wdoor.c.u-tokyo.ac.jp/shogi/)（コンピュータ将棋の対局サーバ）の
+公開棋譜です。
+
+```bash
+uv run python scripts/download_floodgate.py --year 2024      # 年次アーカイブ（約 350MB）
+uv run python scripts/make_labels.py --csa-dir data/floodgate/csa   # 棋譜 → 学習用シャード
+uv run python -m kokoro_shogi.train.mood_distill \
+    --shard-dir data/shards --relations --council --amp --epochs 1
 ```
-- ※ `unity/KokoroShogi/` プロジェクト本体は**週1にU1が作成**します。
-  それまでは unity/README.md の案内だけが置いてあります
-- ※ `Replay.unity` でのサンプル再生確認は**週2以降** (U1のリプレイヤー完成後)
-  の手順です。それより前は何も動かないのが正常です
 
-### Blender側 (担当: B1/B2)
-Blender 4.x を blender.org からインストール → 各自の計画書 §1 へ。
+欲求 6 軸の教師ラベルは**棋譜からルールで自動生成**されます（人手のアノテーションはゼロ）。
+1 エポック（15.6 万局）に GPU で約 13 時間かかります。
 
-うまくいかないときは Issue へ。**READMEの手順通りで動かなければ、それは
-READMEのバグです** (あなたのせいではありません)。
+---
+
+## 構成
+
+```
+src/kokoro_shogi/     モデル・学習・データ処理
+  model/              Transformer trunk、欲求/性格/価値ヘッド、会議ループ、感情 GRU
+  train/              蒸留・自己対戦 PPO・文化リーグ
+  data/               floodgate 棋譜の読み込み、欲求ラベル生成、シャード
+  server/             対局セッション
+scripts/              対局サーバ、棋譜の取得と前処理、可視化
+unity/KokoroShogi/    Unity プロジェクト（3D 盤面・演出・UI）
+docs/                 技術報告・データ契約・設計書・判断記録
+tests/                18 ファイル、330 テスト
+```
+
+主な文書:
+
+| 文書 | 内容 |
+|---|---|
+| [`docs/TECHNICAL_REPORT.md`](./docs/TECHNICAL_REPORT.md) | **技術報告** — 表現・アーキテクチャ・学習・推論・評価と、効かなかった施策の実測 |
+| [`DESIGN.md`](./DESIGN.md) | 設計書（数式仕様・出典） |
+| [`docs/INTERFACE.md`](./docs/INTERFACE.md) | Python ↔ Unity のデータ契約（JSON スキーマ） |
+| [`docs/decisions/`](./docs/decisions/) | 判断記録（ADR）— 何を試して何が効かなかったかの一次記録 |
+| [`TEAM_PLAN.md`](./TEAM_PLAN.md) | チーム運営の計画（役割・マイルストーン） |
+
+---
+
+## このプロジェクトについて
+
+学生チーム（AI 1 名 / Unity 2 名 / Blender 2 名）の作品です。「駒に心を持たせたら
+面白いのでは」という発想から始まり、**面白さの機能を全部切っても素の将棋 AI が残る**
+という原則で設計されています。
+
+技術的に主張できるのは、強さよりも次の 3 点だと考えています。
+
+1. **ターン制完全情報ゲームでの駒粒度マルチエージェント学習** — 駒をトークンにする将棋 AI の
+   先行例が見つかりませんでした（Leela・Chessformer・Ruoss らはいずれもマスか文字列）
+2. **持ち駒 = エージェントの転生** — 捕獲でエージェントの所有権が敵に移る現象は、将棋にしか
+   存在しません
+3. **解釈可能性と強さのトレードオフの定量化** — 「欲求でどれだけ説明できるか」と一致率の
+   曲線を、正則化係数を振って描けます
+
+そして**否定的な結果も同じ重みで公開しています**。内面を強化学習で育てる路線は有害でした。
+自己対戦の勝率は系統の外では通用しませんでした。これらは技術報告の第 9 章に検定値つきで
+記録してあります。
+
+---
 
 ## ライセンス / クレジット
 
-- 棋譜データ: floodgate (wdoor) — 利用条件に従う
-- 実況LLM: Qwen2.5 (Apache 2.0) via Ollama
-- 効果音・BGM・フォント: `unity/KokoroShogi/Assets/_Project/Audio/LICENSES.md` に一覧 (U2管理)
-- テクスチャ素材: `unity/KokoroShogi/Assets/_Project/Textures/LICENSES_textures.md` に一覧 (B2管理)
-- 本体ライセンス: チームで決定後に記載 (公開するなら MIT 推奨)
+本体は [MIT License](./LICENSE) です。
 
-### Blender
+- **棋譜データ**: [floodgate (wdoor)](http://wdoor.c.u-tokyo.ac.jp/shogi/) — 利用条件に従ってください
+- **同梱の学習済みモデル**: floodgate 棋譜から学習したもの。MIT の下で自由に使えます
+- **実況 LLM**: [Qwen2.5](https://github.com/QwenLM/Qwen2.5)（Apache 2.0）via [Ollama](https://ollama.com/)
+- **将棋ライブラリ**: [cshogi](https://github.com/TadaoYamaoka/cshogi)
+- **外部基準に使ったエンジン**: [やねうら王](https://github.com/yaneurao/YaneuraOu) + Háo（NNUE 評価関数、GPLv3）— 別途入手が必要です
+- **効果音・BGM・フォント**: `unity/KokoroShogi/Assets/_Project/Audio/LICENSES.md`
+- **テクスチャ素材**: `unity/KokoroShogi/Assets/_Project/Textures/LICENSES_textures.md`
 
-- [武蔵システム「衡山毛筆フォント」](https://opentype.jp/kouzanmouhitufont.htm)
-　- 駒のフォントに使用させていただきました。
-- - [ambientCG](https://ambientcg.com/)
-　- 部屋や小物のマテリアルに使用させていただきました。
-
-### Unity
-
-- [効果音ラボ 「将棋の駒を打つ」](https://soundeffect-lab.info/sound/search.php?s=%E9%A7%92)
-　- ゲーム内SEに使用させていただきました。
+Unity プロジェクト内のアセットは、それぞれ上記のライセンス一覧に従います。
+MIT が適用されるのは本リポジトリのソースコードと同梱モデルです。
