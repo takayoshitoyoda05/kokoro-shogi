@@ -13218,6 +13218,8 @@ MonoBehaviour:
   overrideCubeBaseColors: 1
   playerCubeBaseColor: {r: 1, g: 0.96822435, b: 0.6273585, a: 1}
   aiCubeBaseColor: {r: 1, g: 0.6745283, b: 0.6904605, a: 1}
+  minimumFireScaleMultiplier: 0.6
+  maximumFireScaleMultiplier: 1
   prefabCursor: {fileID: 3394109681229454874, guid: c26d3cca767285447afd965bb0c57ac5, type: 3}
   prefabUnitTile: {fileID: 1361154618405264304, guid: 5f1018e400e5c2e498fe6d80f782283e, type: 3}
   textAiWinNum: {fileID: 0}

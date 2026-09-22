@@ -5,23 +5,34 @@ using UnityEngine.VFX;
 
 public partial class UnitController
 {
-    const float MinimumFireScale = 13f;
-    const float MaximumFireScale = 77f;
     const float DebuffScaleMultiplier = 1.5f;
+
+    float minimumFireScaleMultiplier = 1f;
+    float maximumFireScaleMultiplier = 2f;
 
     readonly List<Transform> fearEffectRoots = new List<Transform>();
     readonly Dictionary<Transform, Vector3> fearEffectBaseScales = new Dictionary<Transform, Vector3>();
     readonly List<Transform> aggressionEffectRoots = new List<Transform>();
+    readonly Dictionary<Transform, Vector3> aggressionEffectBaseScales = new Dictionary<Transform, Vector3>();
     readonly List<ParticleSystem> fearParticles = new List<ParticleSystem>();
     readonly List<Renderer> fearRenderers = new List<Renderer>();
     readonly List<Renderer> aggressionRenderers = new List<Renderer>();
     readonly List<VisualEffect> aggressionEffects = new List<VisualEffect>();
     ParticleSystem.Particle[] liveFearParticles = new ParticleSystem.Particle[0];
+    Mood currentMood;
     bool effectsCached;
+
+    public void SetFireScaleMultipliers(float minimumMultiplier, float maximumMultiplier)
+    {
+        minimumFireScaleMultiplier = Mathf.Max(0f, minimumMultiplier);
+        maximumFireScaleMultiplier = Mathf.Max(minimumFireScaleMultiplier, maximumMultiplier);
+        if (effectsCached) ApplyMood(currentMood);
+    }
 
     // state_updateの各駒のmoodを、同じIDの駒へ反映する。
     public void ApplyMood(Mood mood)
     {
+        currentMood = mood;
         CacheMoodEffects();
         float fear = ClampMoodValue(mood == null ? 0f : mood.fear);
         float aggression = ClampMoodValue(mood == null ? 0f : mood.aggression);
@@ -63,7 +74,9 @@ public partial class UnitController
 
         // 低いaggressionでも炎が駒の周囲に見えるよう、サイズにもルート補正を使う。
         float aggressionStrength = Mathf.Sqrt(aggression);
-        float fireScale = Mathf.Lerp(MinimumFireScale, MaximumFireScale, aggressionStrength);
+        float minimumFireScale = Mathf.Max(0f, minimumFireScaleMultiplier);
+        float maximumFireScale = Mathf.Max(minimumFireScale, maximumFireScaleMultiplier);
+        float fireScaleMultiplier = Mathf.Lerp(minimumFireScale, maximumFireScale, aggressionStrength);
         // GameObjectが有効でもRendererが無効なPrefabは描画されない。
         foreach (Renderer effectRenderer in aggressionRenderers)
             effectRenderer.enabled = showAggression;
@@ -73,7 +86,7 @@ public partial class UnitController
             if (showAggression)
             {
                 startFire |= !root.gameObject.activeInHierarchy;
-                root.localScale = Vector3.one * fireScale;
+                root.localScale = aggressionEffectBaseScales[root] * fireScaleMultiplier;
                 for (Transform parent = root.parent; parent != transform; parent = parent.parent)
                     parent.gameObject.SetActive(true);
             }
@@ -111,6 +124,7 @@ public partial class UnitController
             else if (child.name == "vfx_Fire")
             {
                 aggressionEffectRoots.Add(child);
+                aggressionEffectBaseScales.Add(child, child.localScale);
                 aggressionRenderers.AddRange(child.GetComponentsInChildren<Renderer>(true));
                 aggressionEffects.AddRange(child.GetComponentsInChildren<VisualEffect>(true));
             }

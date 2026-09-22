@@ -153,6 +153,7 @@ public partial class GameSceneDirector
                 unit = obj.GetComponent<UnitController>();
                 if (!unit) unit = obj.AddComponent<UnitController>();
             }
+            ApplyUnitEffectSettings(unit);
             retained.Add(unit);
             nextUnits.Add(piece.piece_id, unit);
         }
