@@ -229,6 +229,12 @@ public partial class GameSceneDirector : MonoBehaviour
     Color aiCubeBaseColor = Color.white;
     static readonly int CubeBaseColorProperty = Shader.PropertyToID("_BaseColor");
 
+    [Header("炎エフェクト")]
+    [SerializeField, Min(0f), Tooltip("aggressionが低いときの炎サイズ。各vfx_Fireの元スケールに掛ける倍率です。")]
+    float minimumFireScaleMultiplier = 1f;
+    [SerializeField, Min(0f), Tooltip("aggressionが最大のときの炎サイズ。各vfx_Fireの元スケールに掛ける倍率です。")]
+    float maximumFireScaleMultiplier = 2f;
+
     //初期配置
     int[,] boardSetting =
     {
@@ -367,6 +373,7 @@ public partial class GameSceneDirector : MonoBehaviour
                 unit.AddComponent<Rigidbody>();
 
                 UnitController unitctrl = unit.AddComponent<UnitController>();
+                ApplyUnitEffectSettings(unitctrl);
                 unitctrl.Init(player, type, tile, tileindex);
                 ApplyCubeBaseColor(unitctrl);
 
@@ -870,6 +877,32 @@ public partial class GameSceneDirector : MonoBehaviour
                 renderer.SetPropertyBlock(properties, index);
             }
         }
+    }
+
+    void ApplyUnitEffectSettings(UnitController unit)
+    {
+        if (!unit) return;
+        unit.SetFireScaleMultipliers(minimumFireScaleMultiplier, maximumFireScaleMultiplier);
+    }
+
+    void ApplyUnitEffectSettingsToAllUnits()
+    {
+        if (units != null)
+        {
+            foreach (UnitController unit in units)
+                ApplyUnitEffectSettings(unit);
+        }
+        if (captureUnits == null) return;
+        foreach (UnitController unit in captureUnits)
+            ApplyUnitEffectSettings(unit);
+    }
+
+    void OnValidate()
+    {
+        minimumFireScaleMultiplier = Mathf.Max(0f, minimumFireScaleMultiplier);
+        maximumFireScaleMultiplier = Mathf.Max(minimumFireScaleMultiplier, maximumFireScaleMultiplier);
+        if (!Application.isPlaying) return;
+        ApplyUnitEffectSettingsToAllUnits();
     }
 
     //持ち駒を並べる
