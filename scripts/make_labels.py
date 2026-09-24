@@ -22,6 +22,7 @@ Phase 0 の Gate はこのスクリプトのスループット計測 (1M局面�
 from __future__ import annotations
 
 import argparse
+import re
 import time
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from kokoro_shogi.data.floodgate import (
     GameRecord,
     iter_csa_files,
     load_games,
+    rating_weight,
 )
 from kokoro_shogi.data.labels import NUM_AXES, compute_desire_labels
 
@@ -85,7 +87,12 @@ class ShardBuilder:
 
 
 def encode_game(
-    record: GameRecord, tokenizer: PieceTokenizer, builder: ShardBuilder, game_index: int
+    record: GameRecord,
+    tokenizer: PieceTokenizer,
+    builder: ShardBuilder,
+    game_index: int,
+    *,
+    weight: float = 1.0,
 ) -> int:
     """1局を局面ごとに分解してシャードへ積む。積んだ局面数を返す。"""
     game_labels = compute_desire_labels(list(record.moves))
@@ -126,6 +133,8 @@ def encode_game(
             result=np.int8(record.result_at(ply)),
             labels=np.rint(game_labels.labels[ply] * 255).astype(np.uint8),
             game_index=np.int32(game_index),
+            # レート線形重み (2026-09-21)。古いシャードにこの列は無く、その場合は 1.0 扱い
+            weight=np.float32(weight),
         )
         added += 1
 
@@ -147,7 +156,27 @@ def main() -> None:
     parser.add_argument(
         "--min-rating", type=float, default=DEFAULT_MIN_RATING, help="両者の最低レート"
     )
+    parser.add_argument(
+        "--years", default=None,
+        help="使う年を絞る (例: 2015-2026 や 2020,2022)。CSA のパスに含まれる年で判定する。"
+        " floodgate は 2015 年頃まで CSA にレートを書いておらず、--rating-weight では"
+        " 全部落ちるので、レートのある年だけを取るのに使う",
+    )
+    parser.add_argument(
+        "--rating-weight", action="store_true",
+        help="足切りの代わりにレート線形重みを付ける (arXiv:2603.29761)。"
+        " --min-rating を下げて使う。レート不明の棋譜は重み付けできないので捨てる",
+    )
     parser.add_argument("--limit-games", type=int, default=None, help="使う棋譜数の上限")
+    parser.add_argument(
+        "--skip-games", type=int, default=0,
+        help="先頭のこの局数を採否判定だけして書き出さない (再開用。棋譜の列挙順は決定的なので、"
+        " 途中で落ちた生成を同じ引数 + これで続きから再開できる)",
+    )
+    parser.add_argument(
+        "--start-shard", type=int, default=0,
+        help="最初に書き出すシャード番号 (再開用。--skip-games と組で使う)",
+    )
     parser.add_argument("--limit-positions", type=int, default=None, help="作る局面数の上限")
     parser.add_argument(
         "--dry-run", action="store_true", help="書き出さずスループットだけ測る (ベンチ用)"
@@ -156,15 +185,43 @@ def main() -> None:
 
     tokenizer = PieceTokenizer(MAX_PIECES)
     builder = ShardBuilder(args.out_dir, args.shard_size)
+    builder._shard_index = args.start_shard  # noqa: SLF001 - 再開時の続き番号
 
-    games = load_games(
-        iter_csa_files(args.csa_dir), min_rating=args.min_rating, limit=args.limit_games
-    )
+    paths = iter_csa_files(args.csa_dir)
+    if args.years:
+        wanted: set[str] = set()
+        for part in args.years.split(","):
+            if "-" in part:
+                low, high = (int(x) for x in part.split("-", 1))
+                wanted.update(str(y) for y in range(low, high + 1))
+            else:
+                wanted.add(str(int(part)))
+        year_pattern = re.compile(r"(?:^|\D)(20\d\d)")
+        def in_wanted(path: Path) -> bool:
+            # ディレクトリ名 (csa/2024/...) と、なければファイル名の日付から年を拾う
+            for piece in (*path.parts[:-1], path.name):
+                found = year_pattern.search(piece)
+                if found:
+                    return found.group(1) in wanted
+            return False
+        paths = (p for p in paths if in_wanted(p))
+        print(f"年で絞り込み: {sorted(wanted)}")
+
+    games = load_games(paths, min_rating=args.min_rating, limit=args.limit_games)
 
     started = time.perf_counter()
     game_count = 0
+    skipped_unknown = 0
     for game_index, record in enumerate(games):
-        encode_game(record, tokenizer, builder, game_index)
+        weight = 1.0
+        if args.rating_weight:
+            weight = rating_weight(record)
+            if weight <= 0.0:  # レート不明は重み付けできない
+                skipped_unknown += 1
+                continue
+        if game_index < args.skip_games:  # 再開: 採否と game_index の通し番号だけ進める
+            continue
+        encode_game(record, tokenizer, builder, game_index, weight=weight)
         game_count += 1
         if not args.dry_run:
             builder.flush_if_full()  # 局の境界でだけシャードを切る
@@ -172,7 +229,8 @@ def main() -> None:
             break
         if game_count % 200 == 0:
             rate = builder.total / (time.perf_counter() - started)
-            print(f"  {game_count} 局 / {builder.total} 局面 ({rate:.0f} 局面/秒)")
+            extra = f" / レート不明を除外 {skipped_unknown}" if args.rating_weight else ""
+            print(f"  {game_count} 局 / {builder.total} 局面 ({rate:.0f} 局面/秒){extra}")
 
     if args.dry_run:
         builder._buffers.clear()  # noqa: SLF001 - ベンチ用に書き出しだけ捨てる

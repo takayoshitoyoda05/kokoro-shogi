@@ -13,6 +13,7 @@ CSA のパースそのものは cshogi.Parser に任せ、このモジュール�
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,14 @@ import cshogi
 
 #: 両者にこのレート以上を要求する。floodgateはレート不明を 0.0 で出すので自動的に落ちる
 DEFAULT_MIN_RATING = 3000.0
+#: レート線形重み (2026-09-21、arXiv:2603.29761)。足切りで捨てるより、勾配の寄与を
+#: 下げて残すほうが良い。3000 足切りは全体の 42.9% しか残さず、trunk が過学習している
+#: (train 一致率 47.3% / val 41.5%、差が epoch ごとに拡大) いま、データ量が律速。
+#: w(e) = clip((e - WEIGHT_FLOOR) / (WEIGHT_TOP - WEIGHT_FLOOR), WEIGHT_MIN, 1.0)
+#: 論文の「線形・強さの比 20:1」に合わせる (指数 200:1 は検証損失が下がるのに性能が壊れた)
+WEIGHT_FLOOR = 2000.0
+WEIGHT_TOP = 4000.0
+WEIGHT_MIN = 0.05
 #: 短すぎる対局 (接続直後の投了など) を捨てる
 DEFAULT_MIN_MOVES = 50
 #: Max_Moves 到達などの異常に長い対局も捨てる
@@ -60,9 +69,43 @@ class GameRecord:
         return self.result_for_black if ply % 2 == 0 else -self.result_for_black
 
 
+#: 指し手行 `+7776FU` と消費時間行 `T12`
+_MOVE_LINE = re.compile(rb"^[+-]\d{4}[A-Z]{2}\s*$")
+_TIME_LINE = re.compile(rb"^T\d+\s*$")
+
+
+def looks_wellformed(path: Path | str) -> bool:
+    """cshogi のパーサに渡す前の構造検査 (2026-09-21)。
+
+    CSA では消費時間行 `T…` は必ず指し手行の直後に来る。floodgate の古い棋譜には
+    改行が落ちて指し手がコメント行の末尾に連結したものがあり
+    (例: ``'rating:…+2726FU`` の直後に ``T1``)、そのまま `cshogi.Parser` に渡すと
+    **SIGSEGV でプロセスごと落ちる**。Python 側では捕まえられないので、
+    読む前にこの不変条件で弾く。
+    """
+    previous_was_move = False
+    try:
+        with Path(path).open("rb") as handle:
+            for raw in handle:
+                line = raw.rstrip(b"\r\n")
+                if not line or line.startswith(b"'"):
+                    continue
+                if _TIME_LINE.match(line):
+                    if not previous_was_move:
+                        return False
+                    previous_was_move = False
+                else:
+                    previous_was_move = bool(_MOVE_LINE.match(line))
+    except OSError:
+        return False
+    return True
+
+
 def parse_csa(path: Path | str) -> GameRecord | None:
     """CSAファイル1つを読む。壊れていれば None。"""
     file_path = Path(path)
+    if not looks_wellformed(file_path):
+        return None
     parser = cshogi.Parser()
     try:
         parser.parse_csa_file(str(file_path))
@@ -105,6 +148,26 @@ def accept_game(
         return False
     # 平手初期局面から始まらない棋譜は駒の初期IDが振れない (PieceIdTracker の前提)
     return record.start_sfen.split(" ")[0] == cshogi.STARTING_SFEN.split(" ")[0]
+
+
+def rating_weight(
+    record: GameRecord,
+    *,
+    floor: float = WEIGHT_FLOOR,
+    top: float = WEIGHT_TOP,
+    minimum: float = WEIGHT_MIN,
+) -> float:
+    """棋譜の学習重み ∈ [minimum, 1.0] (2026-09-21)。
+
+    両者の低い方のレートを線形に写す。`floor` 以下は `minimum`、`top` 以上は 1.0。
+    レート不明 (floodgate は 0.0 で出す) は重み付けできないので 0.0 を返し、
+    呼び出し側が捨てる。
+    """
+    lowest = min(record.ratings)
+    if lowest <= 0.0:
+        return 0.0
+    scaled = (lowest - floor) / (top - floor)
+    return float(min(1.0, max(minimum, scaled)))
 
 
 def iter_csa_files(root: Path | str) -> Iterator[Path]:
