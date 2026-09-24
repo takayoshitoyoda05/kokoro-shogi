@@ -34,6 +34,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
 from kokoro_shogi.config import REPO_ROOT, Config, load_config, set_global_seed
+from kokoro_shogi.core.squares import NUM_SQUARES
 from kokoro_shogi.data.dataset import ShardDataset, collate, find_shards, split_shards
 from kokoro_shogi.model.baseline_cnn import BaselineCNN
 from kokoro_shogi.model.policy import HEAD_KINDS, KokoroPolicy, PolicyOutput
@@ -52,6 +53,8 @@ _AVERAGED = (
     "accuracy",
     "explained_ratio",
     "soft_loss",
+    "fate_loss",
+    "rebirth_loss",
 )
 
 
@@ -69,6 +72,9 @@ class Metrics:
     explained_ratio: float = 0.0
     #: エンジン教師 (MultiPV) の soft target 損失。教師のある局面が無ければ 0
     soft_loss: float = 0.0
+    #: 駒の一生 (2026-09-20): 運命損失と転生保存則。λ が 0 なら 0
+    fate_loss: float = 0.0
+    rebirth_loss: float = 0.0
     positions: int = 0
 
     def update(self, other: Metrics) -> None:
@@ -94,6 +100,10 @@ class Metrics:
             text += f"  説明率 {self.explained_ratio * 100:.1f}%"
         if self.soft_loss:
             text += f"  soft {self.soft_loss:.4f}"
+        if self.fate_loss:
+            text += f"  fate {self.fate_loss:.4f}"
+        if self.rebirth_loss:
+            text += f"  rebirth {self.rebirth_loss:.4f}"
         return text
 
 
@@ -125,14 +135,34 @@ def compute_loss_tensors(
     値の定義は `compute_loss` と同一。
     """
     action = batch["action"]
-    policy_loss = nn.functional.cross_entropy(output.logits, action)
-    value_loss = nn.functional.mse_loss(output.value, value_target(batch, config))
+    # レート線形重み (2026-09-21)。列の無い古いシャードは全て 1.0 なので従来と同一
+    weight = batch.get("weight")
+    if weight is not None and not bool((weight == 1.0).all()):
+        denominator = weight.sum().clamp(min=1e-6)
+        policy_loss = (
+            nn.functional.cross_entropy(output.logits, action, reduction="none") * weight
+        ).sum() / denominator
+        value_loss = (
+            (output.value - value_target(batch, config)) ** 2 * weight
+        ).sum() / denominator
+    else:
+        policy_loss = nn.functional.cross_entropy(output.logits, action)
+        value_loss = nn.functional.mse_loss(output.value, value_target(batch, config))
     loss = policy_loss + config.loss.c1 * value_loss
 
     soft_loss = torch.zeros((), device=action.device)
     if "teacher_actions" in batch and config.loss.c_soft > 0:
         soft_loss = teacher_soft_loss(output, batch, config.loss.teacher_temp)
         loss = loss + config.loss.c_soft * soft_loss
+
+    fate_loss_value = torch.zeros((), device=action.device)
+    if (
+        "fate_capture" in batch
+        and config.loss.lambda_fate > 0
+        and output.piece_value is not None
+    ):
+        fate_loss_value = fate_loss(output, batch, config)
+        loss = loss + config.loss.lambda_fate * fate_loss_value
 
     desire_loss = torch.zeros((), device=action.device)
     free_term_penalty = torch.zeros((), device=action.device)
@@ -157,8 +187,75 @@ def compute_loss_tensors(
         "accuracy": accuracy,
         "explained_ratio": explained_ratio,
         "soft_loss": soft_loss.detach(),
+        "fate_loss": fate_loss_value.detach(),
+        # 転生保存則は前手の V_i が要るので学習ループ (mood_distill.run_epoch) 側で足す
+        "rebirth_loss": torch.zeros((), device=action.device),
     }
     return loss, parts, int(action.shape[0])
+
+
+def fate_target(batch: dict[str, Tensor], config: Config) -> tuple[Tensor, Tensor]:
+    """駒の運命 f_i ∈ [-1, 1] と有効マスク `(B, N)` (2026-09-20 統合案の核)。
+
+        f_i = -γ^k          k 手後に取られる (成りより先なら)
+            = +b·γ^k        k 手後に成る
+            = +m·γ^(T-t)    勝った側の最終手を指す
+            = +c·γ^(T-t)    終局まで生き残る
+
+    運命は data/sequence.compute_fate が行データから引いた事象 (k や真偽) で、
+    ここで config の γ, b, c, m から値にする。持ち駒の駒 (盤上にいない) はマスクで外す。
+    """
+    cfg = config.loss
+    cap = batch["fate_capture"]
+    prom = batch["fate_promote"]
+    mate = batch["fate_mate"]
+    left = batch["plies_left"].unsqueeze(-1).expand_as(cap).float()
+    gamma = torch.as_tensor(cfg.fate_gamma, device=cap.device, dtype=torch.float32)
+
+    decay_left = gamma**left
+    target = cfg.fate_survive_bonus * decay_left
+    target = torch.where(mate, cfg.fate_mate_bonus * decay_left, target)
+    target = torch.where(
+        prom >= 0, cfg.fate_promote_bonus * gamma ** prom.clamp(min=0).float(), target
+    )
+    captured_first = (cap >= 0) & ((prom < 0) | (cap < prom))
+    target = torch.where(captured_first, -(gamma ** cap.clamp(min=0).float()), target)
+
+    valid = batch["mask"] & (batch["position"] < NUM_SQUARES)
+    return target, valid
+
+
+def fate_loss(output: PolicyOutput, batch: dict[str, Tensor], config: Config) -> Tensor:
+    """L_fate = mean_{盤上の駒} (V_i - f_i)^2。"""
+    target, valid = fate_target(batch, config)
+    count = valid.sum().clamp(min=1)
+    return (((output.piece_value - target) ** 2) * valid).sum() / count
+
+
+def rebirth_loss(
+    piece_value: Tensor,
+    prev_piece_value: Tensor,
+    species: Tensor,
+    position: Tensor,
+    prev_position: Tensor,
+    mask: Tensor,
+    prev_mask: Tensor,
+    kappa: Tensor,
+) -> Tensor:
+    """転生保存則 L_rebirth = mean_{今取られた駒} (V_i(t) - κ_s V_i(t-1))^2。
+
+    「今取られた」= 前の行で盤上にいて、この行で盤上にいない (持ち駒へ移った)。
+    V は手番側視点なので、捕獲の前 (取る側が手番、敵駒) と後 (取られた側が手番、
+    敵の持ち駒) で符号は同じ向きになり、大きさだけが κ_species 倍で移る。
+    `prev_piece_value` は呼び出し側で detach してある (TBPTT 窓をまたぐため)。
+    κ には勾配が流れる。捕獲が無い手では 0。
+    """
+    was_on_board = prev_mask & (prev_position < NUM_SQUARES)
+    now_off_board = mask & (position >= NUM_SQUARES)
+    captured = was_on_board & now_off_board
+    count = captured.sum().clamp(min=1)
+    scaled = kappa[species] * prev_piece_value
+    return (((piece_value - scaled) ** 2) * captured).sum() / count
 
 
 def value_target(batch: dict[str, Tensor], config: Config) -> Tensor:

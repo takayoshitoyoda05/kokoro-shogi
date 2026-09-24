@@ -64,6 +64,10 @@ SHARD_COLUMNS = (
     "game_index",
 )
 
+#: 任意のシャード列。古いシャードには無いので、無ければ既定値で埋める
+#: (weight = レート線形重み、2026-09-21)
+OPTIONAL_COLUMNS = {"weight": np.float32(1.0)}
+
 
 def action_index(move_token: int, move_to: int, move_promote: int) -> int:
     """(駒トークン, 移動先, 成り) → 方策の出力index。"""
@@ -196,7 +200,7 @@ class ShardDataset:
         self.with_effect = with_effect
 
         columns: dict[str, list[np.ndarray]] = {
-            name: [] for name in SHARD_COLUMNS + TEACHER_COLUMNS
+            name: [] for name in SHARD_COLUMNS + TEACHER_COLUMNS + tuple(OPTIONAL_COLUMNS)
         }
         total = 0
         self.teacher_shards = 0
@@ -210,6 +214,12 @@ class ShardDataset:
                     take = min(take, max_positions - total)
                 for name in SHARD_COLUMNS:
                     columns[name].append(shard[name][:take])
+                # 任意列 (weight)。古いシャードには無いので既定値で埋める
+                for name, default in OPTIONAL_COLUMNS.items():
+                    if name in shard.files:
+                        columns[name].append(shard[name][:take])
+                    else:
+                        columns[name].append(np.full(take, default, dtype=default.dtype))
             # エンジン教師の側面ファイル。無いシャードは「教師なし」で埋める
             side = path.with_suffix(".teacher.npz")
             if side.exists():

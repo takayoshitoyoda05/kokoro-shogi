@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, fields, replace
 from pathlib import Path
 
@@ -37,7 +38,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
 from kokoro_shogi.config import Config, load_config, set_global_seed
-from kokoro_shogi.core.tokenizer import MAX_PIECES
+from kokoro_shogi.core.tokenizer import MAX_PIECES, SPECIES_ORDER
 from kokoro_shogi.data.dataset import find_shards
 from kokoro_shogi.data.sequence import SequenceDataset, collate_sequences
 from kokoro_shogi.model.mood import MoodGRU, MoodProjection
@@ -50,6 +51,7 @@ from kokoro_shogi.train.distill import (
     Metrics,
     compute_loss_tensors,
     move_batch,
+    rebirth_loss,
     resolve_device,
 )
 
@@ -72,6 +74,13 @@ _STEP_KEYS = (
     "teacher_value",
     "teacher_actions",
     "teacher_cps",
+    # 駒の運命 (data/sequence.compute_fate)。λ_fate = 0 なら損失側が見ない
+    "fate_capture",
+    "fate_promote",
+    "fate_mate",
+    "plies_left",
+    # レート線形重み (無い古いシャードは 1.0 で、損失側が従来と同じ経路を通る)
+    "weight",
 )
 
 
@@ -115,8 +124,18 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None = None,
     rounds: int | None = None,
     amp: bool = False,
+    rebirth_kappa: Tensor | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> Metrics:
     """1エポック。optimizer が None なら評価 (勾配なし)。
+
+    `on_progress` はバッチを 1 つ終えるごとに「そこまでに処理した局数」で呼ばれる。
+    1 epoch が 13 時間あり、WSL の再起動で 3 回全損した (2026-09-21/22/23) ので、
+    呼び出し側が途中保存に使う。
+
+    `rebirth_kappa` は転生保存則の移転係数 κ_species `(NUM_SPECIES,)`。モデルの
+    state_dict には**入れない** (旧チェックポイントの strict 読み込みを壊さないため)。
+    学習時は optimizer に含め、チェックポイントの `rebirth_kappa` に別キーで保存する。
 
     `rounds` は会議 [D] のラウンド数の上書き (評価時の R=0..4 比較用)。
     None ならモデル既定 (DEFAULT_ROUNDS)。
@@ -127,6 +146,7 @@ def run_epoch(
     gru.train(training)
     total = Metrics()
 
+    games_done = 0
     with torch.set_grad_enabled(training):
         for batch in loader:
             # 有効手のマスクはCPU側で先に読む。GPU転送後に毎手 `.any()` /
@@ -153,6 +173,12 @@ def run_epoch(
             # 集計はテンソルのまま積み、バッチ末尾で一度だけ同期する
             sums = {name: torch.zeros((), device=device) for name in _AVERAGED}
             positions_total = 0
+
+            # 転生保存則 (2026-09-20): 前手の V_i を持ち越す。detach するので勾配は
+            # 今手の V_i と κ にだけ流れる (TBPTT 窓をまたいでも安全)
+            kappa = rebirth_kappa
+            use_rebirth = config.loss.lambda_rebirth > 0 and kappa is not None
+            prev_piece_value: Tensor | None = None
 
             window: list[Tensor] = []
             for t in range(t_end):
@@ -184,6 +210,25 @@ def run_epoch(
                 if amp:
                     output = _float_output(output)
                 loss, parts, positions = compute_loss_tensors(output, step, config)
+                if use_rebirth and output.piece_value is not None:
+                    if t > 0 and prev_piece_value is not None:
+                        prev = prev_piece_value if all_active[t] else prev_piece_value[rows]
+                        prev_position = batch["position"][:, t - 1]
+                        prev_mask = batch["mask"][:, t - 1]
+                        if not all_active[t]:
+                            prev_position, prev_mask = prev_position[rows], prev_mask[rows]
+                        rebirth = rebirth_loss(
+                            output.piece_value, prev, step["species"], step["position"],
+                            prev_position, step["mask"], prev_mask, kappa,
+                        )
+                        loss = loss + config.loss.lambda_rebirth * rebirth
+                        parts["rebirth_loss"] = rebirth.detach()
+                    current = output.piece_value.detach().float()
+                    if all_active[t] or prev_piece_value is None:
+                        prev_piece_value = current if all_active[t] else None
+                    else:
+                        prev_piece_value = prev_piece_value.clone()
+                        prev_piece_value[rows] = current
                 for name in _AVERAGED:
                     sums[name] += parts[name] * positions
                 positions_total += positions
@@ -208,6 +253,10 @@ def run_epoch(
                         positions=positions_total,
                     )
                 )
+
+            games_done += games
+            if on_progress is not None:
+                on_progress(games_done)
 
     return total
 
@@ -265,6 +314,19 @@ def main() -> None:
         help="エンジン教師 (c_soft / teacher_value_weight) を切る。教師の効果を測る対照用",
     )
     parser.add_argument(
+        "--save-every-games", type=int, default=5000,
+        help="この局数ごとに <out-name>_partial.pt へ途中保存する (0 で無効)。"
+        " 1 epoch が 13 時間あり、落ちると全損するため。再開は --warm-start に渡す",
+    )
+    parser.add_argument(
+        "--lambda-fate", type=float, default=None,
+        help="運命損失 λ_f (2026-09-20 統合案の核)。省略時は config (既定 0 = 無効)",
+    )
+    parser.add_argument(
+        "--lambda-rebirth", type=float, default=None,
+        help="転生保存則 λ_r。省略時は config (既定 0 = 無効)",
+    )
+    parser.add_argument(
         "--amp",
         action="store_true",
         help="bfloat16 autocast で学習する (VRAM節約と高速化。valは常にfp32)",
@@ -275,6 +337,18 @@ def main() -> None:
     config = load_config()
     if args.no_teacher:
         config = replace(config, loss=replace(config.loss, c_soft=0.0, teacher_value_weight=0.0))
+    if args.lambda_fate is not None or args.lambda_rebirth is not None:
+        overrides = {}
+        if args.lambda_fate is not None:
+            overrides["lambda_fate"] = args.lambda_fate
+        if args.lambda_rebirth is not None:
+            overrides["lambda_rebirth"] = args.lambda_rebirth
+        config = replace(config, loss=replace(config.loss, **overrides))
+    print(
+        f"駒の一生: λ_fate {config.loss.lambda_fate} / λ_rebirth {config.loss.lambda_rebirth}"
+        f" (γ {config.loss.fate_gamma}, b {config.loss.fate_promote_bonus},"
+        f" c {config.loss.fate_survive_bonus}, m {config.loss.fate_mate_bonus})"
+    )
     set_global_seed(config.seed)
     device = resolve_device(args.device)
 
@@ -308,6 +382,8 @@ def main() -> None:
         print(f"random loop sampling: 学習時の会議ラウンドを {args.council_round_choices} から引く")
     gru = MoodGRU(config.model).to(device)
     projection = MoodProjection(config.model).to(device)  # 未学習のまま同梱 (後で回帰)
+    # 転生保存則の κ_species (2026-09-20)。モデルの外で持つ (旧チェックポイントを壊さない)
+    rebirth_kappa = nn.Parameter(torch.ones(len(SPECIES_ORDER), device=device))
     # ウォームスタート元に学習済みGRU/射影があれば引き継ぐ
     # (イベント特徴の次元が変わった場合は形が合わないので新規初期化)
     if args.warm_start is not None and args.warm_start.exists():
@@ -318,8 +394,17 @@ def main() -> None:
                     module.load_state_dict(warm[key])
                 except RuntimeError:
                     print(f"{key}: 形が合わないため新規初期化 (イベント特徴の変更)")
+        if "rebirth_kappa" in warm:
+            with torch.no_grad():
+                rebirth_kappa.copy_(torch.as_tensor(warm["rebirth_kappa"], device=device))
+            print(f"rebirth_kappa 引き継ぎ: {[round(float(x), 3) for x in rebirth_kappa]}")
     optimizer = torch.optim.AdamW(
-        [*policy.parameters(), *gru.parameters()], lr=args.lr, weight_decay=args.weight_decay
+        [
+            {"params": [*policy.parameters(), *gru.parameters()]},
+            # κ は 1.0 (移転で価値が変わらない) からの偏差そのものが情報なので減衰させない
+            {"params": [rebirth_kappa], "weight_decay": 0.0},
+        ],
+        lr=args.lr, weight_decay=args.weight_decay,
     )
 
     print(
@@ -328,6 +413,49 @@ def main() -> None:
     )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    def snapshot() -> dict:
+        return {
+            "model": policy.state_dict(),
+            "mood_gru": gru.state_dict(),
+            "mood_projection": projection.state_dict(),
+            "rebirth_kappa": rebirth_kappa.detach().cpu(),
+            "warm_start": str(args.warm_start),
+            "features": {
+                "mood": not args.no_mood,
+                "relations": args.relations,
+                "council": args.council,
+            },
+            "council_round_choices": list(args.council_round_choices or ()),
+            "lambda_fate": config.loss.lambda_fate,
+            "lambda_rebirth": config.loss.lambda_rebirth,
+        }
+
+    def save_atomic(payload: dict, path: Path) -> None:
+        """同じディレクトリの一時ファイルへ書いてから rename する。
+
+        torch.save は原子的でないので、書いている最中に電源や WSL が落ちると
+        読めないファイルが残る (2026-09-22 にシャードで実際に踏んだ)。
+        rename は同一ファイルシステム内なら原子的なので、壊れた中間状態が見えない。
+        """
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        torch.save(payload, tmp)
+        tmp.replace(path)
+
+    # 途中保存 (2026-09-23): 1 epoch が 13 時間あり、WSL の再起動で 3 回全損した。
+    # N 局ごとにスナップショットを書き、次回は --warm-start にこれを渡して続きから始める。
+    partial_path = args.out_dir / f"{args.out_name}_partial.pt"
+    last_saved = [0]
+
+    def on_progress(games_done: int) -> None:
+        if args.save_every_games <= 0 or games_done - last_saved[0] < args.save_every_games:
+            return
+        last_saved[0] = games_done
+        payload = snapshot()
+        payload["partial_games"] = games_done
+        save_atomic(payload, partial_path)
+        print(f"  [途中保存] {games_done} 局まで → {partial_path.name}", flush=True)
+
     history = []
     for epoch in range(1, args.epochs + 1):
         started = time.perf_counter()
@@ -340,9 +468,14 @@ def main() -> None:
             tbptt=args.tbptt,
             optimizer=optimizer,
             amp=args.amp,
+            rebirth_kappa=rebirth_kappa,
+            on_progress=on_progress,
         )
         # val は数値の比較可能性を保つため常に fp32 (32局なので速度影響は無視できる)
-        val_metrics = run_epoch(policy, gru, val_loader, config, device, tbptt=args.tbptt)
+        val_metrics = run_epoch(
+            policy, gru, val_loader, config, device, tbptt=args.tbptt,
+            rebirth_kappa=rebirth_kappa,
+        )
         elapsed = time.perf_counter() - started
         print(f"epoch {epoch}: train {train_metrics.format()}")
         print(f"          val   {val_metrics.format()}  ({elapsed:.1f}秒)")
@@ -350,21 +483,9 @@ def main() -> None:
             {"epoch": epoch, "train": asdict(train_metrics), "val": asdict(val_metrics)}
         )
 
-        torch.save(
-            {
-                "model": policy.state_dict(),
-                "mood_gru": gru.state_dict(),
-                "mood_projection": projection.state_dict(),
-                "warm_start": str(args.warm_start),
-                "features": {
-                    "mood": not args.no_mood,
-                    "relations": args.relations,
-                    "council": args.council,
-                },
-                "council_round_choices": list(args.council_round_choices or ()),
-            },
-            args.out_dir / f"{args.out_name}.pt",
-        )
+        save_atomic(snapshot(), args.out_dir / f"{args.out_name}.pt")
+        partial_path.unlink(missing_ok=True)  # epoch を完走したので途中保存は不要
+        last_saved[0] = 0
 
     (args.out_dir / f"{args.out_name}_history.json").write_text(
         json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -27,6 +27,7 @@ from kokoro_shogi.core.tokenizer import MAX_PIECES, PieceTokenizer
 from kokoro_shogi.data.dataset import (
     NUM_MOVE_TO,
     NUM_PROMOTE,
+    OPTIONAL_COLUMNS,
     SHARD_COLUMNS,
     TEACHER_COLUMNS,
     TEACHER_K,
@@ -68,6 +69,14 @@ class GameSequence:
     teacher_value: np.ndarray  # (T,) float32
     teacher_actions: np.ndarray  # (T, K) int64
     teacher_cps: np.ndarray  # (T, K) float32
+    #: 駒の運命 (2026-09-20、docs/decisions/2026-09-20-fate-bipartite-proposal.md)。
+    #: 行 t にいる駒 i がこの先どうなるか。盤上にいない駒・起きない事象は -1 / False
+    fate_capture: np.ndarray  # (T, 40) int64  何手後に取られるか
+    fate_promote: np.ndarray  # (T, 40) int64  何手後に成るか
+    fate_mate: np.ndarray  # (T, 40) bool  勝った側の最終手を指す駒か
+    plies_left: np.ndarray  # (T,) int64  終局までの残り手数
+    #: レート線形重み (2026-09-21)。古いシャードには列が無く、その場合は 1.0
+    weight: np.ndarray  # (T,) float32
 
     @property
     def length(self) -> int:
@@ -88,7 +97,7 @@ class SequenceDataset:
             raise ValueError("シャードが1つも指定されていません。")
 
         columns: dict[str, list[np.ndarray]] = {
-            name: [] for name in SHARD_COLUMNS + TEACHER_COLUMNS
+            name: [] for name in SHARD_COLUMNS + TEACHER_COLUMNS + tuple(OPTIONAL_COLUMNS)
         }
         boundaries: list[tuple[int, int]] = []
         offset = 0
@@ -126,6 +135,11 @@ class SequenceDataset:
                 for name in SHARD_COLUMNS:
                     columns[name].append(shard[name])
                 count = len(index)
+                for name, default in OPTIONAL_COLUMNS.items():
+                    if name in shard.files:
+                        columns[name].append(shard[name])
+                    else:
+                        columns[name].append(np.full(count, default, dtype=default.dtype))
                 offset += count
             side = path.with_suffix(".teacher.npz")
             if side.exists():
@@ -201,6 +215,11 @@ class SequenceDataset:
             dtype=np.int64,
         )
 
+        fate_capture, fate_promote, fate_mate, plies_left = compute_fate(
+            position, owner, mask, promoted,
+            column["move_token"][rows], column["result"][rows],
+        )
+
         return GameSequence(
             species=species,
             position=position,
@@ -217,11 +236,59 @@ class SequenceDataset:
             teacher_value=column["teacher_value"][rows].astype(np.float32),
             teacher_actions=column["teacher_actions"][rows].astype(np.int64),
             teacher_cps=column["teacher_cps"][rows].astype(np.float32),
+            fate_capture=fate_capture,
+            fate_promote=fate_promote,
+            fate_mate=fate_mate,
+            plies_left=plies_left,
+            weight=column["weight"][rows].astype(np.float32),
         )
 
     def __iter__(self):
         for game in range(len(self)):
             yield self[game]
+
+
+def compute_fate(
+    position: np.ndarray,
+    owner: np.ndarray,
+    mask: np.ndarray,
+    promoted: np.ndarray,
+    move_token: np.ndarray,
+    result: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """1 局の行データから駒ごとの運命を引く (ラベル生成も側面ファイルも要らない)。
+
+    捕獲 = 盤上にいた駒が次の行で盤上にいない (持ち駒へ移る)。成り = promoted が 0→1。
+    どちらも「行 t より後で最初に起きるもの」を数える。持ち駒の駒は盤上に戻るまで
+    運命を持たない (-1)。詰ませた駒 = 勝った側が指した最終手の駒 (result[T-1] = +1 は
+    「最終手を指した側の勝ち」)。
+    f_i の値そのもの (γ^k など) は損失側 (train/distill.fate_target) で config から作る。
+    """
+    length, n = position.shape
+    on_board = mask & (position < NUM_SQUARES)
+    captured_at = np.zeros_like(on_board)
+    promoted_at = np.zeros_like(on_board)
+    captured_at[1:] = on_board[:-1] & ~on_board[1:]
+    promoted_at[1:] = on_board[1:] & (promoted[1:] == 1) & (promoted[:-1] == 0)
+
+    def next_event(event: np.ndarray) -> np.ndarray:
+        """行 t より後で最初に event が立つ行番号 (無ければ -1)。後ろから 1 回走査。"""
+        out = np.full((length, n), -1, dtype=np.int64)
+        for t in range(length - 2, -1, -1):
+            out[t] = np.where(event[t + 1], t + 1, out[t + 1])
+        return out
+
+    rows = np.arange(length, dtype=np.int64)[:, None]
+    cap = next_event(captured_at)
+    prom = next_event(promoted_at)
+    fate_capture = np.where(on_board & (cap >= 0), cap - rows, -1)
+    fate_promote = np.where(on_board & (prom >= 0), prom - rows, -1)
+
+    fate_mate = np.zeros((length, n), dtype=bool)
+    if length and result[-1] > 0:
+        fate_mate[:, int(move_token[-1])] = True
+    plies_left = (length - 1) - np.arange(length, dtype=np.int64)
+    return fate_capture, fate_promote, fate_mate, plies_left
 
 
 def collate_sequences(batch: list[GameSequence]) -> dict:
@@ -263,8 +330,15 @@ def collate_sequences(batch: list[GameSequence]) -> dict:
         "teacher_value": pad("teacher_value", torch.float32, fill=np.nan),
         "teacher_actions": pad("teacher_actions", torch.long, fill=-1),
         "teacher_cps": pad("teacher_cps", torch.float32, fill=np.nan),
+        # 運命の詰め物は「事象なし」(-1 / False)。plies_left の詰め物 0 は steps で除外される
+        "fate_capture": pad("fate_capture", torch.long, fill=-1),
+        "fate_promote": pad("fate_promote", torch.long, fill=-1),
+        "fate_mate": pad("fate_mate", torch.bool, fill=False),
+        "plies_left": pad("plies_left", torch.long),
+        # 詰め物の重みは 0 (steps でも除外されるが、重み付き平均の分母を汚さない)
+        "weight": pad("weight", torch.float32),
         "steps": steps,
     }
 
 
-__all__ = ["GameSequence", "SequenceDataset", "collate_sequences"]
+__all__ = ["GameSequence", "SequenceDataset", "collate_sequences", "compute_fate"]

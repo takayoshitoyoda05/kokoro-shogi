@@ -46,6 +46,14 @@ class LossConfig:
     c_soft: float = 1.0
     teacher_temp: float = 200.0
     teacher_value_weight: float = 1.0
+    #: 駒の一生を教師にする (2026-09-20、docs/decisions/2026-09-20-fate-bipartite-proposal.md)。
+    #: どちらも 0 で無効。段 1 の対照は 0 / 運命は lambda_fate / 運命+転生は両方
+    lambda_fate: float = 0.0  # 運命損失 λ_f: Σ_i (V_i - f_i)^2
+    fate_gamma: float = 0.966  # γ (20 手で 0.5)
+    fate_promote_bonus: float = 0.5  # b: 成る
+    fate_survive_bonus: float = 0.3  # c: 終局まで生き残る
+    fate_mate_bonus: float = 1.0  # m: 勝った側の最終手を指す
+    lambda_rebirth: float = 0.0  # 転生保存則 λ_r: 捕獲の前後で V_i(t+1) ≈ κ_s V_i(t)
 
 
 @dataclass(frozen=True)
